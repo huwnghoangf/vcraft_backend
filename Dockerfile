@@ -2,15 +2,14 @@
 FROM maven:3.9.9-eclipse-temurin-21-alpine AS builder
 WORKDIR /build
 
+# Cache dependencies trước khi copy source (tận dụng Docker layer cache)
 COPY pom.xml .
-COPY .mvn .mvn
-COPY mvnw .
-RUN ./mvnw dependency:go-offline -B || mvn dependency:go-offline -B || true
+RUN mvn dependency:go-offline -B
 
 COPY src src
-RUN ./mvnw clean package -DskipTests -B
+RUN mvn clean package -DskipTests -B
 
-# Runtime image
+# Runtime image (nhỏ gọn hơn builder)
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
 
