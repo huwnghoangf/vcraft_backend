@@ -3,6 +3,7 @@ package com.vcraft.domain.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -144,6 +145,27 @@ class AuthServiceTest {
     }
 
     // ====== Refresh Token ======
+
+    @Test
+    @DisplayName("Refresh token thành công phải thực hiện xoay vòng (Token Rotation): hủy token cũ và lưu token mới")
+    void refreshTokenRotatesTokensSuccessfully() {
+        String oldToken = "valid-old-token";
+        when(refreshTokenRepository.findUserIdByToken(oldToken)).thenReturn(Optional.of(USER_ID));
+        when(userRepository.findById(USER_ID)).thenReturn(Optional.of(ACTIVE_USER));
+        when(tokenIssuer.issueAccessToken(ACTIVE_USER)).thenReturn("new-access-token");
+        when(tokenIssuer.generateRefreshToken()).thenReturn("new-refresh-token");
+        when(tokenIssuer.getRefreshTokenExpiry()).thenReturn(Instant.now().plusSeconds(86400));
+
+        AuthService.AuthResult result = authService.refreshToken(oldToken);
+
+        assertThat(result.accessToken()).isEqualTo("new-access-token");
+        assertThat(result.refreshToken()).isEqualTo("new-refresh-token");
+
+        // Kiểm tra bắt buộc phải xóa token cũ không được dùng lại
+        verify(refreshTokenRepository).deleteByToken(oldToken);
+        // Kiểm tra lưu token mới
+        verify(refreshTokenRepository).save(eq(USER_ID), eq("new-refresh-token"), any());
+    }
 
     @Test
     @DisplayName("Refresh token không hợp lệ hoặc không tồn tại phải ném UnauthorizedException")

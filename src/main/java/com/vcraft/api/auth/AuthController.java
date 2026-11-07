@@ -78,10 +78,13 @@ public class AuthController {
     }
 
     @PostMapping("/refresh-token")
-    @Operation(summary = "Làm mới Access Token bằng Refresh Token")
+    @Operation(summary = "Làm mới Access Token bằng Refresh Token (Token Rotation)")
     public ResponseEntity<Map<String, String>> refreshToken(@Valid @RequestBody RefreshTokenRequest request) {
-        String newAccessToken = authService.refreshToken(request.refreshToken());
-        return ResponseEntity.ok(Map.of("accessToken", newAccessToken));
+        AuthService.AuthResult result = authService.refreshToken(request.refreshToken());
+        return ResponseEntity.ok(Map.of(
+                "accessToken", result.accessToken(),
+                "refreshToken", result.refreshToken()
+        ));
     }
 
     @GetMapping("/me")

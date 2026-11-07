@@ -124,7 +124,7 @@ public class AuthService {
         return new AuthResult(user, accessToken, refreshToken);
     }
 
-    public String refreshToken(String token) {
+    public AuthResult refreshToken(String token) {
         UUID userId = refreshTokenRepository.findUserIdByToken(token)
                 .orElseThrow(() -> new UnauthorizedException("Refresh token không hợp lệ hoặc đã hết hạn"));
 
@@ -135,7 +135,14 @@ public class AuthService {
             throw new UnauthorizedException("Tài khoản đã bị khóa");
         }
 
-        return tokenIssuer.issueAccessToken(user);
+        // Token Rotation: hủy refresh token cũ ngay khi sử dụng và sinh cặp token mới
+        refreshTokenRepository.deleteByToken(token);
+
+        String newAccessToken = tokenIssuer.issueAccessToken(user);
+        String newRefreshToken = tokenIssuer.generateRefreshToken();
+        refreshTokenRepository.save(user.id(), newRefreshToken, tokenIssuer.getRefreshTokenExpiry());
+
+        return new AuthResult(user, newAccessToken, newRefreshToken);
     }
 
     public void revokeRefreshToken(String token) {
