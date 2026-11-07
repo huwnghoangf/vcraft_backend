@@ -40,6 +40,10 @@ public class CartService {
 
     public Cart updateItemQuantity(Caller caller, UUID itemId, int quantity) {
         Cart cart = getOrCreateCart(caller);
+        boolean exists = cart.items() != null && cart.items().stream().anyMatch(item -> item.id().equals(itemId));
+        if (!exists) {
+            throw new NotFoundException("Mục giỏ hàng không tồn tại trong giỏ của bạn");
+        }
         if (quantity <= 0) {
             cartRepository.removeItem(itemId);
         } else {
@@ -49,6 +53,11 @@ public class CartService {
     }
 
     public Cart removeItem(Caller caller, UUID itemId) {
+        Cart cart = getOrCreateCart(caller);
+        boolean exists = cart.items() != null && cart.items().stream().anyMatch(item -> item.id().equals(itemId));
+        if (!exists) {
+            throw new NotFoundException("Mục giỏ hàng không tồn tại trong giỏ của bạn");
+        }
         cartRepository.removeItem(itemId);
         return getOrCreateCart(caller);
     }
