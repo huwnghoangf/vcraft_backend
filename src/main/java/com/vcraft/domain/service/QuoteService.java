@@ -197,6 +197,19 @@ public class QuoteService {
 
         List<Bid> bids = bidRepository.findByQuoteRequestId(quoteId);
 
+        // Bảo mật giá thầu: Nghệ nhân chỉ thấy giá thầu của xưởng mình
+        if (caller.isArtisan() && !caller.isAdmin()) {
+            UUID userId = caller.requireUserId();
+            ArtisanProfile artisan = artisanRepository.findByUserId(userId).orElse(null);
+            if (artisan != null) {
+                bids = bids.stream()
+                        .filter(b -> b.artisanId().equals(artisan.id()))
+                        .toList();
+            } else {
+                bids = List.of();
+            }
+        }
+
         return new QuoteWithBids(quote, bids);
 
     }
