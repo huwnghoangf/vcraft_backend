@@ -75,9 +75,28 @@ public class QuoteService {
         QuoteRequest quote = quoteRepository.findById(quoteId)
                 .orElseThrow(() -> new NotFoundException("Không tìm thấy yêu cầu báo giá"));
 
-        List<Bid> bids = bidRepository.findByQuoteRequestId(quoteId);
+        if (!caller.isAdmin()) {
+            UUID userId = caller.requireUserId();
+            if (caller.isBuyer()) {
+                if (!quote.buyerId().equals(userId)) {
+                    throw new ForbiddenException("Bạn không có quyền xem yêu cầu báo giá của người khác");
+                }
+            } else if (caller.isArtisan()) {
+                if (quote.status() == QuoteStatus.DRAFT) {
+                    throw new ForbiddenException("Yêu cầu báo giá đang ở trạng thái bản nháp của khách hàng");
+                }
+                ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+                        .orElseThrow(() -> new ForbiddenException("Chưa có hồ sơ nghệ nhân"));
+                if (quote.targetArtisanIds() != null && !quote.targetArtisanIds().isEmpty()
+                        && !quote.targetArtisanIds().contains(artisan.id())) {
+                    throw new ForbiddenException("Yêu cầu báo giá này không được gửi tới xưởng của bạn");
+                }
+            } else {
+                throw new ForbiddenException("Bạn không có quyền xem yêu cầu báo giá này");
+            }
+        }
 
-        // Buyer only sees bids for their quote; Artisan sees their own bid or all bids if sent; Admin sees all
+        List<Bid> bids = bidRepository.findByQuoteRequestId(quoteId);
         return new QuoteWithBids(quote, bids);
     }
 

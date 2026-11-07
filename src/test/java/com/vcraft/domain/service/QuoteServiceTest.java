@@ -132,6 +132,17 @@ class QuoteServiceTest {
     }
 
     @Test
+    @DisplayName("Người mua xem chi tiết báo giá của người mua khác phải ném ForbiddenException")
+    void getQuoteDetailOfOtherBuyerThrowsForbidden() {
+        when(quoteRepository.findById(QUOTE_ID)).thenReturn(Optional.of(draftQuote));
+        Caller stranger = Caller.authenticated(OTHER_USER_ID, "stranger@vcraft.vn", Role.BUYER);
+
+        assertThatThrownBy(() -> quoteService.getQuoteDetail(stranger, QUOTE_ID))
+                .isInstanceOf(ForbiddenException.class)
+                .hasMessageContaining("Bạn không có quyền xem yêu cầu báo giá của người khác");
+    }
+
+    @Test
     @DisplayName("Sửa yêu cầu báo giá của người khác phải ném ForbiddenException")
     void updateQuoteOfOtherUserThrowsForbidden() {
         when(quoteRepository.findById(QUOTE_ID)).thenReturn(Optional.of(draftQuote));
