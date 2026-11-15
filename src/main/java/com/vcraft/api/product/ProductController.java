@@ -51,8 +51,8 @@ public class ProductController {
             @RequestParam(required = false) UUID categoryId,
             @RequestParam(required = false) BigDecimal minPrice,
             @RequestParam(required = false) BigDecimal maxPrice,
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int limit,
+            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
+            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
             @RequestParam(required = false) String sort
     ) {
         List<Product> data = productService.getProducts(artisanId, categoryId, minPrice, maxPrice, page, limit, sort);
@@ -86,7 +86,7 @@ public class ProductController {
         Caller caller = CallerResolver.resolve(authentication);
         Product updated = productService.updateProduct(
                 caller, id, request.name(), request.description(),
-                request.price(), request.stock() != null ? request.stock() : 0, request.images()
+                request.price(), request.stock(), request.images()
         );
         return ResponseEntity.ok(updated);
     }
@@ -106,16 +106,14 @@ public class ProductController {
                                                            @PathVariable UUID id,
                                                            @RequestParam("files") List<MultipartFile> files) {
         Caller caller = CallerResolver.resolve(authentication);
-        List<String> imageUrls = new ArrayList<>();
-        for (MultipartFile file : files) {
-            try {
-                String url = imageStorageService.storeImage(file.getInputStream(), file.getOriginalFilename(), "products");
-                imageUrls.add(url);
-            } catch (Exception e) {
-                throw new RuntimeException("Lỗi lưu ảnh: " + e.getMessage());
-            }
+        productService.authorizeImageUpload(caller, id);
+        List<String> imageUrls = com.vcraft.api.ImageUploadSupport.storeAll(imageStorageService, files, "products");
+        try {
+            productService.addProductImages(caller, id, imageUrls);
+        } catch (RuntimeException ex) {
+            com.vcraft.api.ImageUploadSupport.cleanup(imageStorageService, imageUrls, ex);
+            throw ex;
         }
-        productService.addProductImages(caller, id, imageUrls);
         return ResponseEntity.ok(imageUrls);
     }
 }

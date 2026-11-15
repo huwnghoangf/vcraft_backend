@@ -46,8 +46,8 @@ public class ArtisanController {
     @GetMapping
     @Operation(summary = "Danh sách tất cả xưởng gốm đã được BQL duyệt")
     public ResponseEntity<PageResponse<ArtisanProfile>> getArtisans(
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int limit,
+            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
+            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
             @RequestParam(required = false) String search,
             @RequestParam(required = false) String district
     ) {
@@ -105,16 +105,14 @@ public class ArtisanController {
     public ResponseEntity<List<String>> uploadImages(Authentication authentication,
                                                      @RequestParam("files") List<MultipartFile> files) {
         Caller caller = CallerResolver.resolve(authentication);
-        List<String> imageUrls = new ArrayList<>();
-        for (MultipartFile file : files) {
-            try {
-                String url = imageStorageService.storeImage(file.getInputStream(), file.getOriginalFilename(), "artisans");
-                imageUrls.add(url);
-            } catch (Exception e) {
-                throw new RuntimeException("Lỗi lưu ảnh: " + e.getMessage());
-            }
+        artisanService.getMyProfile(caller);
+        List<String> imageUrls = com.vcraft.api.ImageUploadSupport.storeAll(imageStorageService, files, "artisans");
+        try {
+            artisanService.addWorkshopImages(caller, imageUrls);
+        } catch (RuntimeException ex) {
+            com.vcraft.api.ImageUploadSupport.cleanup(imageStorageService, imageUrls, ex);
+            throw ex;
         }
-        artisanService.addWorkshopImages(caller, imageUrls);
         return ResponseEntity.ok(imageUrls);
     }
 

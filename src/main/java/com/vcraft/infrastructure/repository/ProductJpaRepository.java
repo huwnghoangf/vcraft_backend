@@ -11,10 +11,13 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 public interface ProductJpaRepository extends JpaRepository<ProductEntity, UUID> {
+    @Override
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    java.util.Optional<ProductEntity> findById(UUID id);
     List<ProductEntity> findByArtisanId(UUID artisanId);
     List<ProductEntity> findByBatchId(UUID batchId);
 
-    @Query("SELECT p FROM ProductEntity p WHERE " +
+    @Query("SELECT p FROM ProductEntity p WHERE EXISTS (SELECT a.id FROM ArtisanProfileEntity a WHERE a.id = p.artisanId AND a.status = 'APPROVED') AND " +
            "(:artisanId IS NULL OR p.artisanId = :artisanId) AND " +
            "(:categoryId IS NULL OR p.categoryId = :categoryId) AND " +
            "(:minPrice IS NULL OR p.price >= :minPrice) AND " +

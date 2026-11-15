@@ -27,6 +27,7 @@ public class ArtisanService {
 
     public ArtisanProfile getArtisanDetail(UUID id) {
         return artisanRepository.findById(id)
+                .filter(ArtisanProfile::isApproved)
                 .orElseThrow(() -> new NotFoundException("Không tìm thấy thông tin xưởng gốm"));
     }
 
@@ -40,6 +41,8 @@ public class ArtisanService {
                                           String address, Double lat, Double lng, Boolean openStatus,
                                           List<String> images, String familyHistory, List<String> certificates) {
         ArtisanProfile current = getMyProfile(caller);
+        validateLocation(lat, lng);
+        if (workshopName != null && workshopName.isBlank()) throw new com.vcraft.domain.exception.InvalidInputException("Tên xưởng không được trống");
 
         ArtisanProfile updated = new ArtisanProfile(
                 current.id(),
@@ -91,6 +94,7 @@ public class ArtisanService {
     }
 
     public ArtisanProfile updateLocation(Caller caller, Double lat, Double lng, String address) {
+        validateLocation(lat, lng);
         ArtisanProfile current = getMyProfile(caller);
         ArtisanProfile updated = new ArtisanProfile(
                 current.id(),
@@ -115,6 +119,11 @@ public class ArtisanService {
         return artisanRepository.save(updated);
     }
 
+    private void validateLocation(Double lat, Double lng) {
+        if ((lat != null && (!Double.isFinite(lat) || lat < -90 || lat > 90))
+                || (lng != null && (!Double.isFinite(lng) || lng < -180 || lng > 180)))
+            throw new com.vcraft.domain.exception.InvalidInputException("Tọa độ xưởng không hợp lệ");
+    }
     public List<ArtisanProfile> getMapPins(boolean openOnly) {
         return artisanRepository.findAllForMap(openOnly);
     }

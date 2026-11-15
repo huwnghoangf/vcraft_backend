@@ -50,8 +50,8 @@ public class BatchController {
     @Operation(summary = "Danh sách lô sản xuất của xưởng đang đăng nhập")
     public ResponseEntity<PageResponse<Batch>> getMyBatches(
             Authentication authentication,
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int limit,
+            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
+            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
             @RequestParam(required = false) String status
     ) {
         Caller caller = CallerResolver.resolve(authentication);
@@ -137,16 +137,14 @@ public class BatchController {
                                                         @PathVariable UUID logId,
                                                         @RequestParam("files") List<MultipartFile> files) {
         Caller caller = CallerResolver.resolve(authentication);
-        List<String> imageUrls = new ArrayList<>();
-        for (MultipartFile file : files) {
-            try {
-                String url = imageStorageService.storeImage(file.getInputStream(), file.getOriginalFilename(), "logs");
-                imageUrls.add(url);
-            } catch (Exception e) {
-                throw new RuntimeException("Lỗi lưu ảnh: " + e.getMessage());
-            }
+        batchService.authorizeLogImageUpload(caller, id, logId);
+        List<String> imageUrls = com.vcraft.api.ImageUploadSupport.storeAll(imageStorageService, files, "logs");
+        try {
+            batchService.addLogImages(caller, id, logId, imageUrls);
+        } catch (RuntimeException ex) {
+            com.vcraft.api.ImageUploadSupport.cleanup(imageStorageService, imageUrls, ex);
+            throw ex;
         }
-        batchService.addLogImages(caller, id, logId, imageUrls);
         return ResponseEntity.ok(imageUrls);
     }
 }
