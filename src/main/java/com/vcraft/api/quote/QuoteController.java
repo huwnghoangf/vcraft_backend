@@ -45,8 +45,8 @@ public class QuoteController {
     @Operation(summary = "Buyer xem danh sách yêu cầu báo giá của mình")
     public ResponseEntity<PageResponse<QuoteRequest>> getMyQuotes(
             Authentication authentication,
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int limit,
+            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
+            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
             @RequestParam(required = false) String status
     ) {
         Caller caller = CallerResolver.resolve(authentication);
@@ -108,8 +108,8 @@ public class QuoteController {
     @Operation(summary = "Nghệ nhân xem danh sách các yêu cầu báo giá gửi đến xưởng")
     public ResponseEntity<List<QuoteRequest>> getIncomingQuotes(
             Authentication authentication,
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int limit,
+            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
+            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
             @RequestParam(required = false) String status
     ) {
         Caller caller = CallerResolver.resolve(authentication);
@@ -141,13 +141,13 @@ public class QuoteController {
     }
 
     @PatchMapping("/{id}/bids/{bidId}/accept")
-    @Operation(summary = "Buyer chọn xưởng gốm thắng thầu (Bid -> Accepted, Quote -> InProduction, các Bid khác -> Rejected)")
+    @Operation(summary = "Buyer chọn xưởng gốm thắng thầu (Bid -> Accepted, Quote -> Accepted, các Bid khác -> Rejected)")
     public ResponseEntity<Map<String, String>> acceptBid(Authentication authentication,
                                                          @PathVariable UUID id,
                                                          @PathVariable UUID bidId) {
         Caller caller = CallerResolver.resolve(authentication);
         quoteService.acceptBid(caller, id, bidId);
-        return ResponseEntity.ok(Map.of("message", "Đã chấp thuận giá thầu. Đơn hàng chuyển sang trạng thái sản xuất."));
+        return ResponseEntity.ok(Map.of("message", "Đã chấp thuận giá thầu. Đơn hàng đã được chấp nhận, chờ xưởng bắt đầu sản xuất."));
     }
 
     @PatchMapping("/{id}/bids/{bidId}/reject")
@@ -158,6 +158,23 @@ public class QuoteController {
         Caller caller = CallerResolver.resolve(authentication);
         quoteService.rejectBid(caller, id, bidId);
         return ResponseEntity.ok(Map.of("message", "Đã từ chối giá thầu."));
+    }
+
+    @PostMapping("/{id}/allocations")
+    @Operation(summary = "BQL chia yêu cầu chưa có chào giá cho nhiều xưởng; buyer duyệt giá từng phần")
+    public ResponseEntity<List<QuoteRequest>> allocate(Authentication authentication, @PathVariable UUID id,
+                                                       @RequestBody List<QuoteService.Allocation> parts) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(quoteService.allocate(CallerResolver.resolve(authentication), id, parts));
+    }
+
+    @GetMapping("/{id}/allocations")
+    public ResponseEntity<List<QuoteRequest>> allocations(Authentication authentication, @PathVariable UUID id) {
+        return ResponseEntity.ok(quoteService.getAllocations(CallerResolver.resolve(authentication), id));
+    }
+
+    @PatchMapping("/{id}/start-production")
+    public ResponseEntity<QuoteRequest> startProduction(Authentication authentication, @PathVariable UUID id) {
+        return ResponseEntity.ok(quoteService.startProduction(CallerResolver.resolve(authentication), id));
     }
 
     @PatchMapping("/{id}/complete")

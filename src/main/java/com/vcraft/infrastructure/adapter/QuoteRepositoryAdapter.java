@@ -16,9 +16,11 @@ import org.springframework.stereotype.Component;
 public class QuoteRepositoryAdapter implements QuoteRepository {
 
     private final QuoteJpaRepository jpaRepository;
+    private final com.vcraft.infrastructure.repository.QuoteAllocationJpaRepository allocations;
 
-    public QuoteRepositoryAdapter(QuoteJpaRepository jpaRepository) {
+    public QuoteRepositoryAdapter(QuoteJpaRepository jpaRepository, com.vcraft.infrastructure.repository.QuoteAllocationJpaRepository allocations) {
         this.jpaRepository = jpaRepository;
+        this.allocations = allocations;
     }
 
     @Override
@@ -30,6 +32,18 @@ public class QuoteRepositoryAdapter implements QuoteRepository {
     public QuoteRequest save(QuoteRequest quote) {
         QuoteRequestEntity entity = toEntity(quote);
         return toDomain(jpaRepository.save(entity));
+    }
+
+    @Override
+    public void linkAllocation(UUID parentId, UUID childId) {
+        allocations.save(new com.vcraft.infrastructure.entity.QuoteAllocationEntity(parentId, childId));
+    }
+
+    @Override
+    public List<QuoteRequest> findAllocations(UUID parentId) {
+        return allocations.findByParentId(parentId).stream()
+                .map(link -> jpaRepository.findById(link.getChildId()).orElseThrow())
+                .map(this::toDomain).toList();
     }
 
     @Override
@@ -56,7 +70,7 @@ public class QuoteRepositoryAdapter implements QuoteRepository {
     public List<QuoteRequest> findIncomingForArtisan(UUID artisanId, QuoteStatus status, int page, int limit) {
         var pageable = PageRequest.of(Math.max(0, page - 1), Math.max(1, limit), Sort.by(Sort.Direction.DESC, "createdAt"));
         String statusStr = status != null ? status.name() : null;
-        return jpaRepository.findIncomingForArtisans(statusStr, pageable).getContent().stream()
+        return jpaRepository.findIncomingForArtisans("[\"" + artisanId + "\"]", statusStr, PageRequest.of(Math.max(0, page - 1), Math.max(1, limit), Sort.by(Sort.Direction.DESC, "created_at"))).getContent().stream()
                 .map(this::toDomain)
                 .toList();
     }
@@ -64,7 +78,7 @@ public class QuoteRepositoryAdapter implements QuoteRepository {
     @Override
     public long countIncomingForArtisan(UUID artisanId, QuoteStatus status) {
         String statusStr = status != null ? status.name() : null;
-        return jpaRepository.countIncomingForArtisans(statusStr);
+        return jpaRepository.countIncomingForArtisans("[\"" + artisanId + "\"]", statusStr);
     }
 
     @Override

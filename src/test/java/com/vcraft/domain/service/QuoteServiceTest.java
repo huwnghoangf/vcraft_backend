@@ -544,5 +544,54 @@ class QuoteServiceTest {
 
     }
 
+
+    @Test
+    void rejectsChangingBidThroughAnotherQuote() {
+        var other = new Bid(BID_ID, UUID.randomUUID(), ARTISAN_ID, BigDecimal.ONE,
+                BigDecimal.TEN, 2, null, null, BidStatus.PENDING, Instant.now(), Instant.now());
+        when(quoteRepository.findById(QUOTE_ID)).thenReturn(Optional.of(biddingQuote));
+        when(bidRepository.findById(BID_ID)).thenReturn(Optional.of(other));
+        when(artisanRepository.findByUserId(ARTISAN_USER_ID)).thenReturn(Optional.of(artisanProfile));
+        var artisan = Caller.authenticated(ARTISAN_USER_ID, "a@v.vn", Role.ARTISAN);
+        var buyer = Caller.authenticated(BUYER_ID, "b@v.vn", Role.BUYER);
+        assertThatThrownBy(() -> quoteService.updateBid(artisan, QUOTE_ID, BID_ID, BigDecimal.TEN, 3, null))
+                .isInstanceOf(com.vcraft.domain.exception.InvalidInputException.class);
+        assertThatThrownBy(() -> quoteService.rejectBid(buyer, QUOTE_ID, BID_ID))
+                .isInstanceOf(com.vcraft.domain.exception.InvalidInputException.class);
+        verify(bidRepository, never()).save(any());
+    }
+
+    @Test
+    void acceptanceWaitsForExplicitProductionStart() {
+        when(quoteRepository.findById(QUOTE_ID)).thenReturn(Optional.of(biddingQuote));
+        when(bidRepository.findById(BID_ID)).thenReturn(Optional.of(pendingBid));
+        quoteService.acceptBid(Caller.authenticated(BUYER_ID, "b@v.vn", Role.BUYER), QUOTE_ID, BID_ID);
+        var captured = org.mockito.ArgumentCaptor.forClass(QuoteRequest.class);
+        verify(quoteRepository).save(captured.capture());
+        assertThat(captured.getValue().status()).isEqualTo(QuoteStatus.ACCEPTED);
+    }
+
+    @Test
+    void cannotAcceptPreviouslyRejectedBid() {
+        var rejected = new Bid(BID_ID, QUOTE_ID, ARTISAN_ID, BigDecimal.ONE,
+                BigDecimal.TEN, 2, null, null, BidStatus.REJECTED, Instant.now(), Instant.now());
+        when(quoteRepository.findById(QUOTE_ID)).thenReturn(Optional.of(biddingQuote));
+        when(bidRepository.findById(BID_ID)).thenReturn(Optional.of(rejected));
+        assertThatThrownBy(() -> quoteService.acceptBid(Caller.authenticated(BUYER_ID, "b@v.vn", Role.BUYER), QUOTE_ID, BID_ID))
+                .isInstanceOf(ConflictException.class);
+        verify(bidRepository, never()).save(any());
+    }
+
+    @Test void allocationRequiresAdminAndExactQuantity() {
+        var buyer = Caller.authenticated(BUYER_ID, "b@v.vn", Role.BUYER);
+        assertThatThrownBy(() -> quoteService.allocate(buyer, QUOTE_ID, List.of()))
+                .isInstanceOf(ForbiddenException.class);
+        when(quoteRepository.findById(QUOTE_ID)).thenReturn(Optional.of(draftQuote));
+        var admin = Caller.authenticated(OTHER_USER_ID, "admin@v.vn", Role.ADMIN);
+        assertThatThrownBy(() -> quoteService.allocate(admin, QUOTE_ID, List.of(
+                new QuoteService.Allocation(ARTISAN_ID, 10), new QuoteService.Allocation(UUID.randomUUID(), 20))))
+                .isInstanceOf(com.vcraft.domain.exception.InvalidInputException.class);
+        verify(quoteRepository, never()).save(any());
+    }
 }
 

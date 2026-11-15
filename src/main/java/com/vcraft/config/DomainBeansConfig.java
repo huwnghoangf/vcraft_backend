@@ -54,8 +54,8 @@ public class DomainBeansConfig {
     }
 
     @Bean
-    public ProductService productService(ProductRepository productRepository, ArtisanRepository artisanRepository) {
-        return new ProductService(productRepository, artisanRepository);
+    public ProductService productService(ProductRepository productRepository, ArtisanRepository artisanRepository, BatchRepository batchRepository) {
+        return new ProductService(productRepository, artisanRepository, batchRepository);
     }
 
     @Bean
@@ -68,7 +68,7 @@ public class DomainBeansConfig {
                                     ProductionLogRepository logRepository,
                                     ArtisanRepository artisanRepository,
                                     QrCodeGenerator qrCodeGenerator,
-                                    @Value("${app.frontend-url:http://localhost:3000}") String frontendUrl) {
+                                    @Value("${app.frontend-url:http://localhost:8080}") String frontendUrl) {
         return new BatchService(batchRepository, logRepository, artisanRepository, qrCodeGenerator, frontendUrl);
     }
 
@@ -83,8 +83,8 @@ public class DomainBeansConfig {
     @Bean
     public QuoteService quoteService(QuoteRepository quoteRepository,
                                     BidRepository bidRepository,
-                                    ArtisanRepository artisanRepository) {
-        return new QuoteService(quoteRepository, bidRepository, artisanRepository);
+                                    ArtisanRepository artisanRepository, ProductRepository productRepository) {
+        return new QuoteService(quoteRepository, bidRepository, artisanRepository, productRepository);
     }
 
     @Bean
