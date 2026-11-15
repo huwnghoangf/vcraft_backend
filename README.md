@@ -39,3 +39,47 @@ Hệ thống sẽ tự động khởi tạo database PostgreSQL và service back
 ## 4. Tài liệu API Endpoints
 Base URL: `/api/v1`
 Xem chi tiết và test tương tác trực tiếp tại: `http://localhost:8080/swagger-ui.html`
+
+## Bản rà soát và sửa lỗi 15/11/2026
+
+Đọc `AUDIT_VI.md` để xem đối chiếu đề bài, danh sách lỗi và giới hạn kiểm chứng.
+
+- Trang truy xuất QR: `http://localhost:8080/trace/{batchId}`
+- Mặc định `FRONTEND_URL=http://localhost:8080` để QR trỏ tới trang tích hợp. Nếu dùng frontend riêng, đặt lại biến này.
+- Phạm vi bàn giao là backend theo yêu cầu đã làm rõ. API bản đồ trả ghim/popup và trạng thái mở cửa; không xây frontend. Trang trace chỉ là landing page tối thiểu phục vụ QR.
+
+### Luồng báo giá sau sửa
+
+`DRAFT -> SENT -> BIDDING -> ACCEPTED -> IN_PRODUCTION -> DELIVERED -> CLOSED`
+
+Sau khi buyer chấp nhận bid, xưởng thắng thầu gọi `PATCH /api/v1/quotes/{id}/start-production` để bắt đầu sản xuất. Không bỏ qua bước `ACCEPTED` nữa.
+
+BQL chia yêu cầu chưa có chào giá qua:
+
+```http
+POST /api/v1/quotes/{id}/allocations
+Authorization: Bearer <admin-token>
+Content-Type: application/json
+
+[{"artisanId":"<uuid-xuong-1>","quantity":600},{"artisanId":"<uuid-xuong-2>","quantity":400}]
+```
+
+Tổng số lượng phải bằng yêu cầu gốc, ít nhất hai xưởng đã duyệt khác nhau. Yêu cầu cha chuyển `ALLOCATED`, yêu cầu con `SENT` tới từng xưởng. Buyer duyệt bid và theo dõi giao hàng từng phần. `GET /api/v1/quotes/{id}/allocations` dành cho buyer sở hữu và BQL. Trạng thái cha `ALLOCATED` là nhãn điều phối, không tự tổng hợp trạng thái giao hàng con.
+
+### Kiểm thử
+
+```bash
+./mvnw clean verify
+# Sau khi bật app và PostgreSQL riêng để kiểm thử:
+# scripts/smoke.py tạo dữ liệu thử; chỉ chạy trên DB thử nghiệm.
+python -m pip install pillow
+python scripts/smoke.py
+```
+
+Flyway V1/V2 giữ nguyên. V3 thêm unique index bid/xưởng; V4 lưu quan hệ điều phối. Với DB cũ có bid trùng, V3 dừng để xử lý dữ liệu có kiểm soát; không tự xóa bid.
+
+### Cấu hình bảo mật
+
+`JWT_SECRET` để trống sẽ dùng khóa ký ngẫu nhiên mỗi lần khởi động. Access token cũ mất hiệu lực sau restart. Đặt secret riêng ít nhất 32 byte để giữ phiên ổn định khi restart/chạy nhiều instance. Bản sửa không còn dùng khóa ký mặc định công khai. `CORS_ALLOWED_ORIGINS` mặc định chỉ cho localhost:3000 và localhost:8080; đặt danh sách origin của ứng dụng khi tích hợp.
+
+Pagination: `page >= 1`, `1 <= limit <= 100`. API nhận enum sai trả 400. `/forgot-password` và `/reset-password` trả 501 vì chưa có luồng email/token reset trong nguồn gốc và nằm ngoài đề bài; không giả báo thành công.

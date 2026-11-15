@@ -1,0 +1,22 @@
+{
+  "scope": "backend only, per user clarification",
+  "date": "2026-11-15",
+  "original_source_sha256": "1b2ba23be85b3afa456e93113167f98d40731255a414c09cc5a98122f8ed3d70",
+  "unit_and_slice_tests": {
+    "original": 72,
+    "fixed": 82,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "http_asserted_calls": 104,
+  "concurrent_acceptance_statuses": [
+    200,
+    409
+  ],
+  "postgresql": "15.20",
+  "flyway_migrations": 5,
+  "compose_config": "pass",
+  "docker_image_build": "not tested",
+  "frontend": "out of scope"
+}

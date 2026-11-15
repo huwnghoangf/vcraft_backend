@@ -1,0 +1,3688 @@
+--- a/.env.example
++++ b/.env.example
+@@ -11,7 +11,9 @@
+ POSTGRES_PORT=5432
+ 
+ # Security & JWT
+-JWT_SECRET=vcraft-bat-trang-secret-key-32chars-minimum-token
++# Empty = random signing key per startup. Set a private 32+ byte secret for stable sessions.
++CORS_ALLOWED_ORIGINS=http://localhost:3000,http://localhost:8080
++JWT_SECRET=
+ JWT_ACCESS_TOKEN_MINUTES=60
+ JWT_REFRESH_TOKEN_DAYS=7
+ 
+@@ -19,4 +21,4 @@
+ FILE_UPLOAD_DIR=./uploads
+ # Public Base URL for QR codes / Tracing
+ APP_BASE_URL=http://localhost:8080
+-FRONTEND_URL=http://localhost:3000
++FRONTEND_URL=http://localhost:8080
+--- a/README.md
++++ b/README.md
+@@ -39,3 +39,47 @@
+ ## 4. Tài liệu API Endpoints
+ Base URL: `/api/v1`
+ Xem chi tiết và test tương tác trực tiếp tại: `http://localhost:8080/swagger-ui.html`
++
++## Bản rà soát và sửa lỗi 15/11/2026
++
++Đọc `AUDIT_VI.md` để xem đối chiếu đề bài, danh sách lỗi và giới hạn kiểm chứng.
++
++- Trang truy xuất QR: `http://localhost:8080/trace/{batchId}`
++- Mặc định `FRONTEND_URL=http://localhost:8080` để QR trỏ tới trang tích hợp. Nếu dùng frontend riêng, đặt lại biến này.
++- Phạm vi bàn giao là backend theo yêu cầu đã làm rõ. API bản đồ trả ghim/popup và trạng thái mở cửa; không xây frontend. Trang trace chỉ là landing page tối thiểu phục vụ QR.
++
++### Luồng báo giá sau sửa
++
++`DRAFT -> SENT -> BIDDING -> ACCEPTED -> IN_PRODUCTION -> DELIVERED -> CLOSED`
++
++Sau khi buyer chấp nhận bid, xưởng thắng thầu gọi `PATCH /api/v1/quotes/{id}/start-production` để bắt đầu sản xuất. Không bỏ qua bước `ACCEPTED` nữa.
++
++BQL chia yêu cầu chưa có chào giá qua:
++
++```http
++POST /api/v1/quotes/{id}/allocations
++Authorization: Bearer <admin-token>
++Content-Type: application/json
++
++[{"artisanId":"<uuid-xuong-1>","quantity":600},{"artisanId":"<uuid-xuong-2>","quantity":400}]
++```
++
++Tổng số lượng phải bằng yêu cầu gốc, ít nhất hai xưởng đã duyệt khác nhau. Yêu cầu cha chuyển `ALLOCATED`, yêu cầu con `SENT` tới từng xưởng. Buyer duyệt bid và theo dõi giao hàng từng phần. `GET /api/v1/quotes/{id}/allocations` dành cho buyer sở hữu và BQL. Trạng thái cha `ALLOCATED` là nhãn điều phối, không tự tổng hợp trạng thái giao hàng con.
++
++### Kiểm thử
++
++```bash
++./mvnw clean verify
++# Sau khi bật app và PostgreSQL riêng để kiểm thử:
++# scripts/smoke.py tạo dữ liệu thử; chỉ chạy trên DB thử nghiệm.
++python -m pip install pillow
++python scripts/smoke.py
++```
++
++Flyway V1/V2 giữ nguyên. V3 thêm unique index bid/xưởng; V4 lưu quan hệ điều phối. Với DB cũ có bid trùng, V3 dừng để xử lý dữ liệu có kiểm soát; không tự xóa bid.
++
++### Cấu hình bảo mật
++
++`JWT_SECRET` để trống sẽ dùng khóa ký ngẫu nhiên mỗi lần khởi động. Access token cũ mất hiệu lực sau restart. Đặt secret riêng ít nhất 32 byte để giữ phiên ổn định khi restart/chạy nhiều instance. Bản sửa không còn dùng khóa ký mặc định công khai. `CORS_ALLOWED_ORIGINS` mặc định chỉ cho localhost:3000 và localhost:8080; đặt danh sách origin của ứng dụng khi tích hợp.
++
++Pagination: `page >= 1`, `1 <= limit <= 100`. API nhận enum sai trả 400. `/forgot-password` và `/reset-password` trả 501 vì chưa có luồng email/token reset trong nguồn gốc và nằm ngoài đề bài; không giả báo thành công.
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -33,9 +33,9 @@
+       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-vcraft_db}
+       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-postgres}
+       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+-      JWT_SECRET: ${JWT_SECRET:-vcraft-bat-trang-secret-key-32chars-minimum-token}
++      JWT_SECRET: ${JWT_SECRET:-}
+       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8080}
+-      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
++      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:8080}
+     ports:
+       - "${SERVER_PORT:-8080}:8080"
+     volumes:
+--- a/src/main/java/com/vcraft/api/GlobalExceptionHandler.java
++++ b/src/main/java/com/vcraft/api/GlobalExceptionHandler.java
+@@ -59,12 +59,15 @@
+             HttpMediaTypeNotSupportedException.class,
+             MissingServletRequestParameterException.class,
+             MissingRequestHeaderException.class,
++            org.springframework.web.multipart.support.MissingServletRequestPartException.class,
+             NoResourceFoundException.class
+     })
+     public ResponseEntity<ErrorResponse> handleSpringMvc(Exception ex, HttpServletRequest request) {
+         HttpStatus status = HttpStatus.BAD_REQUEST;
+         if (ex instanceof NoResourceFoundException) {
+             status = HttpStatus.NOT_FOUND;
++        } else if (ex instanceof HttpMediaTypeNotSupportedException) {
++            status = HttpStatus.UNSUPPORTED_MEDIA_TYPE;
+         } else if (ex instanceof HttpRequestMethodNotSupportedException) {
+             status = HttpStatus.METHOD_NOT_ALLOWED;
+         }
+@@ -75,6 +78,22 @@
+     public ResponseEntity<ErrorResponse> handleDataIntegrity(DataIntegrityViolationException ex, HttpServletRequest request) {
+         log.warn("Lỗi ràng buộc dữ liệu tại {}: {}", request.getRequestURI(), ex.getMostSpecificCause().getMessage());
+         return build(HttpStatus.CONFLICT, "Dữ liệu bị trùng lặp hoặc vi phạm ràng buộc dữ liệu trong hệ thống", request);
++    }
++
++    @ExceptionHandler(org.springframework.web.multipart.MaxUploadSizeExceededException.class)
++    public ResponseEntity<ErrorResponse> handleUploadSize(Exception ex, HttpServletRequest request) {
++        return build(HttpStatus.PAYLOAD_TOO_LARGE, "Ảnh tối đa 10MB, tổng request tối đa 50MB", request);
++    }
++
++    @ExceptionHandler(org.springframework.dao.ConcurrencyFailureException.class)
++    public ResponseEntity<ErrorResponse> handleConcurrency(Exception ex, HttpServletRequest request) {
++        return build(HttpStatus.CONFLICT, "Dữ liệu vừa được thay đổi, vui lòng tải lại và thử lại", request);
++    }
++
++    @ExceptionHandler({org.springframework.web.method.annotation.HandlerMethodValidationException.class,
++            jakarta.validation.ConstraintViolationException.class})
++    public ResponseEntity<ErrorResponse> handleParameterValidation(Exception ex, HttpServletRequest request) {
++        return build(HttpStatus.BAD_REQUEST, "Tham số không hợp lệ: page >= 1, 1 <= limit <= 100", request);
+     }
+ 
+     @ExceptionHandler(Exception.class)
+--- a/src/main/java/com/vcraft/api/ImageUploadSupport.java
++++ b/src/main/java/com/vcraft/api/ImageUploadSupport.java
+@@ -0,0 +1,33 @@
++package com.vcraft.api;
++
++import com.vcraft.domain.exception.InvalidInputException;
++import com.vcraft.domain.service.ImageStorageService;
++import java.util.ArrayList;
++import java.util.List;
++import org.springframework.web.multipart.MultipartFile;
++
++/** Compensate filesystem writes if a multi-image request fails part way through. */
++public final class ImageUploadSupport {
++    private ImageUploadSupport() {}
++    public static List<String> storeAll(ImageStorageService storage, List<MultipartFile> files, String category) {
++        if (files == null || files.isEmpty()) throw new InvalidInputException("Cần ít nhất một ảnh");
++        var urls = new ArrayList<String>();
++        try {
++            for (var file : files) {
++                try (var stream = file.getInputStream()) {
++                    urls.add(storage.storeImage(stream, file.getOriginalFilename(), category));
++                }
++            }
++            return urls;
++        } catch (Exception ex) {
++            cleanup(storage, urls, ex);
++            if (ex instanceof RuntimeException runtime) throw runtime;
++            throw new InvalidInputException("Không thể đọc ảnh tải lên");
++        }
++    }
++    public static void cleanup(ImageStorageService storage, List<String> urls, Exception failure) {
++        for (var url : urls) {
++            try { storage.deleteImage(url); } catch (RuntimeException cleanupError) { failure.addSuppressed(cleanupError); }
++        }
++    }
++}
+--- a/src/main/java/com/vcraft/api/admin/AdminController.java
++++ b/src/main/java/com/vcraft/api/admin/AdminController.java
+@@ -37,8 +37,8 @@
+     @Operation(summary = "Danh sách nghệ nhân đang chờ duyệt hồ sơ đăng ký vào làng nghề")
+     public ResponseEntity<PageResponse<ArtisanProfile>> getPendingArtisans(
+             Authentication authentication,
+-            @RequestParam(defaultValue = "1") int page,
+-            @RequestParam(defaultValue = "10") int limit
++            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
++            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit
+     ) {
+         Caller caller = CallerResolver.resolve(authentication);
+         List<ArtisanProfile> data = adminService.getPendingArtisans(caller, page, limit);
+@@ -79,8 +79,8 @@
+     public ResponseEntity<PageResponse<User>> getUsers(
+             Authentication authentication,
+             @RequestParam(required = false) String role,
+-            @RequestParam(defaultValue = "1") int page,
+-            @RequestParam(defaultValue = "10") int limit,
++            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
++            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
+             @RequestParam(required = false) String search
+     ) {
+         Caller caller = CallerResolver.resolve(authentication);
+@@ -104,8 +104,8 @@
+     public ResponseEntity<PageResponse<QuoteRequest>> getAllQuotes(
+             Authentication authentication,
+             @RequestParam(required = false) String status,
+-            @RequestParam(defaultValue = "1") int page,
+-            @RequestParam(defaultValue = "10") int limit
++            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
++            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit
+     ) {
+         Caller caller = CallerResolver.resolve(authentication);
+         List<QuoteRequest> data = adminService.getAllQuotes(caller, status, page, limit);
+--- a/src/main/java/com/vcraft/api/artisan/ArtisanController.java
++++ b/src/main/java/com/vcraft/api/artisan/ArtisanController.java
+@@ -46,8 +46,8 @@
+     @GetMapping
+     @Operation(summary = "Danh sách tất cả xưởng gốm đã được BQL duyệt")
+     public ResponseEntity<PageResponse<ArtisanProfile>> getArtisans(
+-            @RequestParam(defaultValue = "1") int page,
+-            @RequestParam(defaultValue = "10") int limit,
++            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
++            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
+             @RequestParam(required = false) String search,
+             @RequestParam(required = false) String district
+     ) {
+@@ -105,16 +105,14 @@
+     public ResponseEntity<List<String>> uploadImages(Authentication authentication,
+                                                      @RequestParam("files") List<MultipartFile> files) {
+         Caller caller = CallerResolver.resolve(authentication);
+-        List<String> imageUrls = new ArrayList<>();
+-        for (MultipartFile file : files) {
+-            try {
+-                String url = imageStorageService.storeImage(file.getInputStream(), file.getOriginalFilename(), "artisans");
+-                imageUrls.add(url);
+-            } catch (Exception e) {
+-                throw new RuntimeException("Lỗi lưu ảnh: " + e.getMessage());
+-            }
++        artisanService.getMyProfile(caller);
++        List<String> imageUrls = com.vcraft.api.ImageUploadSupport.storeAll(imageStorageService, files, "artisans");
++        try {
++            artisanService.addWorkshopImages(caller, imageUrls);
++        } catch (RuntimeException ex) {
++            com.vcraft.api.ImageUploadSupport.cleanup(imageStorageService, imageUrls, ex);
++            throw ex;
+         }
+-        artisanService.addWorkshopImages(caller, imageUrls);
+         return ResponseEntity.ok(imageUrls);
+     }
+ 
+--- a/src/main/java/com/vcraft/api/auth/AuthController.java
++++ b/src/main/java/com/vcraft/api/auth/AuthController.java
+@@ -107,12 +107,12 @@
+     @PostMapping("/forgot-password")
+     @Operation(summary = "Yêu cầu đặt lại mật khẩu qua email")
+     public ResponseEntity<Map<String, String>> forgotPassword(@RequestBody Map<String, String> body) {
+-        return ResponseEntity.ok(Map.of("message", "Email hướng dẫn đặt lại mật khẩu đã được gửi"));
++        return ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).body(Map.of("message", "Chưa cấu hình dịch vụ email đặt lại mật khẩu"));
+     }
+ 
+     @PostMapping("/reset-password")
+     @Operation(summary = "Xác nhận đặt lại mật khẩu mới")
+     public ResponseEntity<Map<String, String>> resetPassword(@RequestBody Map<String, String> body) {
+-        return ResponseEntity.ok(Map.of("message", "Mật khẩu đã được đặt lại thành công"));
++        return ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).body(Map.of("message", "Chưa triển khai luồng xác thực token đặt lại mật khẩu"));
+     }
+ }
+--- a/src/main/java/com/vcraft/api/auth/dto/RegisterArtisanRequest.java
++++ b/src/main/java/com/vcraft/api/auth/dto/RegisterArtisanRequest.java
+@@ -24,5 +24,7 @@
+         Double lng,
+         String description,
+         List<String> certificates,
++        @NotBlank(message = "Mật khẩu không được để trống")
++        @jakarta.validation.constraints.Size(min = 6, message = "Mật khẩu tối thiểu 6 ký tự")
+         String password
+ ) {}
+--- a/src/main/java/com/vcraft/api/batch/BatchController.java
++++ b/src/main/java/com/vcraft/api/batch/BatchController.java
+@@ -50,8 +50,8 @@
+     @Operation(summary = "Danh sách lô sản xuất của xưởng đang đăng nhập")
+     public ResponseEntity<PageResponse<Batch>> getMyBatches(
+             Authentication authentication,
+-            @RequestParam(defaultValue = "1") int page,
+-            @RequestParam(defaultValue = "10") int limit,
++            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
++            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
+             @RequestParam(required = false) String status
+     ) {
+         Caller caller = CallerResolver.resolve(authentication);
+@@ -137,16 +137,14 @@
+                                                         @PathVariable UUID logId,
+                                                         @RequestParam("files") List<MultipartFile> files) {
+         Caller caller = CallerResolver.resolve(authentication);
+-        List<String> imageUrls = new ArrayList<>();
+-        for (MultipartFile file : files) {
+-            try {
+-                String url = imageStorageService.storeImage(file.getInputStream(), file.getOriginalFilename(), "logs");
+-                imageUrls.add(url);
+-            } catch (Exception e) {
+-                throw new RuntimeException("Lỗi lưu ảnh: " + e.getMessage());
+-            }
++        batchService.authorizeLogImageUpload(caller, id, logId);
++        List<String> imageUrls = com.vcraft.api.ImageUploadSupport.storeAll(imageStorageService, files, "logs");
++        try {
++            batchService.addLogImages(caller, id, logId, imageUrls);
++        } catch (RuntimeException ex) {
++            com.vcraft.api.ImageUploadSupport.cleanup(imageStorageService, imageUrls, ex);
++            throw ex;
+         }
+-        batchService.addLogImages(caller, id, logId, imageUrls);
+         return ResponseEntity.ok(imageUrls);
+     }
+ }
+--- a/src/main/java/com/vcraft/api/news/NewsController.java
++++ b/src/main/java/com/vcraft/api/news/NewsController.java
+@@ -40,8 +40,8 @@
+     @GetMapping
+     @Operation(summary = "Danh sách tin tức và thông báo cộng đồng làng nghề")
+     public ResponseEntity<PageResponse<News>> getNewsList(
+-            @RequestParam(defaultValue = "1") int page,
+-            @RequestParam(defaultValue = "10") int limit,
++            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
++            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
+             @RequestParam(required = false) String type
+     ) {
+         List<News> data = newsService.getNewsList(type, page, limit);
+--- a/src/main/java/com/vcraft/api/order/OrderController.java
++++ b/src/main/java/com/vcraft/api/order/OrderController.java
+@@ -49,8 +49,8 @@
+     @Operation(summary = "Lịch sử đơn hàng của Buyer")
+     public ResponseEntity<PageResponse<Order>> getMyOrders(
+             Authentication authentication,
+-            @RequestParam(defaultValue = "1") int page,
+-            @RequestParam(defaultValue = "10") int limit,
++            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
++            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
+             @RequestParam(required = false) String status
+     ) {
+         Caller caller = CallerResolver.resolve(authentication);
+@@ -81,8 +81,8 @@
+     @Operation(summary = "Nghệ nhân xem danh sách đơn hàng mà xưởng nhận được")
+     public ResponseEntity<PageResponse<Order>> getArtisanOrders(
+             Authentication authentication,
+-            @RequestParam(defaultValue = "1") int page,
+-            @RequestParam(defaultValue = "10") int limit,
++            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
++            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
+             @RequestParam(required = false) String status
+     ) {
+         Caller caller = CallerResolver.resolve(authentication);
+--- a/src/main/java/com/vcraft/api/product/ProductController.java
++++ b/src/main/java/com/vcraft/api/product/ProductController.java
+@@ -51,8 +51,8 @@
+             @RequestParam(required = false) UUID categoryId,
+             @RequestParam(required = false) BigDecimal minPrice,
+             @RequestParam(required = false) BigDecimal maxPrice,
+-            @RequestParam(defaultValue = "1") int page,
+-            @RequestParam(defaultValue = "10") int limit,
++            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
++            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
+             @RequestParam(required = false) String sort
+     ) {
+         List<Product> data = productService.getProducts(artisanId, categoryId, minPrice, maxPrice, page, limit, sort);
+@@ -86,7 +86,7 @@
+         Caller caller = CallerResolver.resolve(authentication);
+         Product updated = productService.updateProduct(
+                 caller, id, request.name(), request.description(),
+-                request.price(), request.stock() != null ? request.stock() : 0, request.images()
++                request.price(), request.stock(), request.images()
+         );
+         return ResponseEntity.ok(updated);
+     }
+@@ -106,16 +106,14 @@
+                                                            @PathVariable UUID id,
+                                                            @RequestParam("files") List<MultipartFile> files) {
+         Caller caller = CallerResolver.resolve(authentication);
+-        List<String> imageUrls = new ArrayList<>();
+-        for (MultipartFile file : files) {
+-            try {
+-                String url = imageStorageService.storeImage(file.getInputStream(), file.getOriginalFilename(), "products");
+-                imageUrls.add(url);
+-            } catch (Exception e) {
+-                throw new RuntimeException("Lỗi lưu ảnh: " + e.getMessage());
+-            }
++        productService.authorizeImageUpload(caller, id);
++        List<String> imageUrls = com.vcraft.api.ImageUploadSupport.storeAll(imageStorageService, files, "products");
++        try {
++            productService.addProductImages(caller, id, imageUrls);
++        } catch (RuntimeException ex) {
++            com.vcraft.api.ImageUploadSupport.cleanup(imageStorageService, imageUrls, ex);
++            throw ex;
+         }
+-        productService.addProductImages(caller, id, imageUrls);
+         return ResponseEntity.ok(imageUrls);
+     }
+ }
+--- a/src/main/java/com/vcraft/api/quote/QuoteController.java
++++ b/src/main/java/com/vcraft/api/quote/QuoteController.java
+@@ -45,8 +45,8 @@
+     @Operation(summary = "Buyer xem danh sách yêu cầu báo giá của mình")
+     public ResponseEntity<PageResponse<QuoteRequest>> getMyQuotes(
+             Authentication authentication,
+-            @RequestParam(defaultValue = "1") int page,
+-            @RequestParam(defaultValue = "10") int limit,
++            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
++            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
+             @RequestParam(required = false) String status
+     ) {
+         Caller caller = CallerResolver.resolve(authentication);
+@@ -108,8 +108,8 @@
+     @Operation(summary = "Nghệ nhân xem danh sách các yêu cầu báo giá gửi đến xưởng")
+     public ResponseEntity<List<QuoteRequest>> getIncomingQuotes(
+             Authentication authentication,
+-            @RequestParam(defaultValue = "1") int page,
+-            @RequestParam(defaultValue = "10") int limit,
++            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
++            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
+             @RequestParam(required = false) String status
+     ) {
+         Caller caller = CallerResolver.resolve(authentication);
+@@ -141,13 +141,13 @@
+     }
+ 
+     @PatchMapping("/{id}/bids/{bidId}/accept")
+-    @Operation(summary = "Buyer chọn xưởng gốm thắng thầu (Bid -> Accepted, Quote -> InProduction, các Bid khác -> Rejected)")
++    @Operation(summary = "Buyer chọn xưởng gốm thắng thầu (Bid -> Accepted, Quote -> Accepted, các Bid khác -> Rejected)")
+     public ResponseEntity<Map<String, String>> acceptBid(Authentication authentication,
+                                                          @PathVariable UUID id,
+                                                          @PathVariable UUID bidId) {
+         Caller caller = CallerResolver.resolve(authentication);
+         quoteService.acceptBid(caller, id, bidId);
+-        return ResponseEntity.ok(Map.of("message", "Đã chấp thuận giá thầu. Đơn hàng chuyển sang trạng thái sản xuất."));
++        return ResponseEntity.ok(Map.of("message", "Đã chấp thuận giá thầu. Đơn hàng đã được chấp nhận, chờ xưởng bắt đầu sản xuất."));
+     }
+ 
+     @PatchMapping("/{id}/bids/{bidId}/reject")
+@@ -158,6 +158,23 @@
+         Caller caller = CallerResolver.resolve(authentication);
+         quoteService.rejectBid(caller, id, bidId);
+         return ResponseEntity.ok(Map.of("message", "Đã từ chối giá thầu."));
++    }
++
++    @PostMapping("/{id}/allocations")
++    @Operation(summary = "BQL chia yêu cầu chưa có chào giá cho nhiều xưởng; buyer duyệt giá từng phần")
++    public ResponseEntity<List<QuoteRequest>> allocate(Authentication authentication, @PathVariable UUID id,
++                                                       @RequestBody List<QuoteService.Allocation> parts) {
++        return ResponseEntity.status(HttpStatus.CREATED).body(quoteService.allocate(CallerResolver.resolve(authentication), id, parts));
++    }
++
++    @GetMapping("/{id}/allocations")
++    public ResponseEntity<List<QuoteRequest>> allocations(Authentication authentication, @PathVariable UUID id) {
++        return ResponseEntity.ok(quoteService.getAllocations(CallerResolver.resolve(authentication), id));
++    }
++
++    @PatchMapping("/{id}/start-production")
++    public ResponseEntity<QuoteRequest> startProduction(Authentication authentication, @PathVariable UUID id) {
++        return ResponseEntity.ok(quoteService.startProduction(CallerResolver.resolve(authentication), id));
+     }
+ 
+     @PatchMapping("/{id}/complete")
+--- a/src/main/java/com/vcraft/api/review/ReviewController.java
++++ b/src/main/java/com/vcraft/api/review/ReviewController.java
+@@ -42,8 +42,8 @@
+     @Operation(summary = "Lấy danh sách đánh giá của sản phẩm kèm điểm trung bình")
+     public ResponseEntity<Map<String, Object>> getProductReviews(
+             @PathVariable UUID id,
+-            @RequestParam(defaultValue = "1") int page,
+-            @RequestParam(defaultValue = "10") int limit
++            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
++            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit
+     ) {
+         List<Review> data = reviewService.getProductReviews(id, page, limit);
+         long total = reviewService.countProductReviews(id);
+@@ -90,8 +90,8 @@
+     @Operation(summary = "Lấy danh sách đánh giá của xưởng gốm kèm điểm trung bình")
+     public ResponseEntity<Map<String, Object>> getArtisanReviews(
+             @PathVariable UUID id,
+-            @RequestParam(defaultValue = "1") int page,
+-            @RequestParam(defaultValue = "10") int limit
++            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
++            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit
+     ) {
+         List<Review> data = reviewService.getArtisanReviews(id, page, limit);
+         long total = reviewService.countArtisanReviews(id);
+--- a/src/main/java/com/vcraft/api/trace/TracePageController.java
++++ b/src/main/java/com/vcraft/api/trace/TracePageController.java
+@@ -0,0 +1,10 @@
++package com.vcraft.api.trace;
++
++import org.springframework.stereotype.Controller;
++import org.springframework.web.bind.annotation.GetMapping;
++
++@Controller
++public class TracePageController {
++    @GetMapping("/trace/{batchId}")
++    public String trace() { return "forward:/trace.html"; }
++}
+--- a/src/main/java/com/vcraft/config/DomainBeansConfig.java
++++ b/src/main/java/com/vcraft/config/DomainBeansConfig.java
+@@ -54,8 +54,8 @@
+     }
+ 
+     @Bean
+-    public ProductService productService(ProductRepository productRepository, ArtisanRepository artisanRepository) {
+-        return new ProductService(productRepository, artisanRepository);
++    public ProductService productService(ProductRepository productRepository, ArtisanRepository artisanRepository, BatchRepository batchRepository) {
++        return new ProductService(productRepository, artisanRepository, batchRepository);
+     }
+ 
+     @Bean
+@@ -68,7 +68,7 @@
+                                     ProductionLogRepository logRepository,
+                                     ArtisanRepository artisanRepository,
+                                     QrCodeGenerator qrCodeGenerator,
+-                                    @Value("${app.frontend-url:http://localhost:3000}") String frontendUrl) {
++                                    @Value("${app.frontend-url:http://localhost:8080}") String frontendUrl) {
+         return new BatchService(batchRepository, logRepository, artisanRepository, qrCodeGenerator, frontendUrl);
+     }
+ 
+@@ -83,8 +83,8 @@
+     @Bean
+     public QuoteService quoteService(QuoteRepository quoteRepository,
+                                     BidRepository bidRepository,
+-                                    ArtisanRepository artisanRepository) {
+-        return new QuoteService(quoteRepository, bidRepository, artisanRepository);
++                                    ArtisanRepository artisanRepository, ProductRepository productRepository) {
++        return new QuoteService(quoteRepository, bidRepository, artisanRepository, productRepository);
+     }
+ 
+     @Bean
+--- a/src/main/java/com/vcraft/config/JsonConfig.java
++++ b/src/main/java/com/vcraft/config/JsonConfig.java
+@@ -0,0 +1,18 @@
++package com.vcraft.config;
++
++import com.fasterxml.jackson.annotation.JsonIgnore;
++import com.vcraft.domain.model.User;
++import org.springframework.boot.autoconfigure.jackson.Jackson2ObjectMapperBuilderCustomizer;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++
++@Configuration
++public class JsonConfig {
++    abstract static class SafeUser {
++        @JsonIgnore abstract String passwordHash();
++    }
++    @Bean
++    public Jackson2ObjectMapperBuilderCustomizer safeUsers() {
++        return builder -> builder.mixIn(User.class, SafeUser.class);
++    }
++}
+--- a/src/main/java/com/vcraft/config/SecurityConfig.java
++++ b/src/main/java/com/vcraft/config/SecurityConfig.java
+@@ -28,8 +28,11 @@
+ @Configuration
+ @EnableConfigurationProperties(JwtProperties.class)
+ public class SecurityConfig {
++    @org.springframework.beans.factory.annotation.Value("${app.cors-allowed-origins:http://localhost:3000,http://localhost:8080}")
++    private List<String> allowedOrigins;
+ 
+     private static final String[] PUBLIC_GET_ENDPOINTS = {
++            "/vcraft.css", "/trace.html", "/trace.js", "/trace/*", "/api/v1/qr/**",
+             "/api/v1/health",
+             "/api/v1/artisans",
+             "/api/v1/artisans/map",
+@@ -63,7 +66,7 @@
+     @Bean
+     public SecurityFilterChain securityFilterChain(HttpSecurity http,
+                                                    JwtTokenProvider tokenProvider,
+-                                                   ObjectMapper objectMapper) throws Exception {
++                                                   ObjectMapper objectMapper, com.vcraft.domain.repository.UserRepository users) throws Exception {
+         http
+                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
+                 .csrf(AbstractHttpConfigurer::disable)
+@@ -72,11 +75,12 @@
+                         .authenticationEntryPoint(jsonUnauthorizedEntryPoint(objectMapper))
+                         .accessDeniedHandler(jsonAccessDeniedHandler(objectMapper)))
+                 .authorizeHttpRequests(auth -> auth
++                        .dispatcherTypeMatchers(jakarta.servlet.DispatcherType.FORWARD).permitAll()
+                         .requestMatchers(PUBLIC_POST_ENDPOINTS).permitAll()
+                         .requestMatchers(HttpMethod.GET, PUBLIC_GET_ENDPOINTS).permitAll()
+                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
+                         .anyRequest().authenticated())
+-                .addFilterBefore(new JwtAuthenticationFilter(tokenProvider), UsernamePasswordAuthenticationFilter.class);
++                .addFilterBefore(new JwtAuthenticationFilter(tokenProvider, users), UsernamePasswordAuthenticationFilter.class);
+ 
+         return http.build();
+     }
+@@ -84,7 +88,7 @@
+     @Bean
+     public CorsConfigurationSource corsConfigurationSource() {
+         CorsConfiguration config = new CorsConfiguration();
+-        config.setAllowedOriginPatterns(List.of("*"));
++        config.setAllowedOrigins(allowedOrigins);
+         config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
+         config.setAllowedHeaders(List.of("*"));
+         config.setAllowCredentials(true);
+--- a/src/main/java/com/vcraft/config/TransactionConfig.java
++++ b/src/main/java/com/vcraft/config/TransactionConfig.java
+@@ -0,0 +1,31 @@
++package com.vcraft.config;
++
++import org.springframework.aop.framework.autoproxy.BeanNameAutoProxyCreator;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++import org.springframework.transaction.PlatformTransactionManager;
++import org.springframework.transaction.interceptor.MatchAlwaysTransactionAttributeSource;
++import org.springframework.transaction.interceptor.RuleBasedTransactionAttribute;
++import org.springframework.transaction.interceptor.TransactionInterceptor;
++
++/** Atomic use cases without introducing Spring dependencies into the domain. */
++@Configuration
++public class TransactionConfig {
++    @Bean
++    public TransactionInterceptor domainTransactionInterceptor(PlatformTransactionManager manager) {
++        var source = new MatchAlwaysTransactionAttributeSource();
++        source.setTransactionAttribute(new RuleBasedTransactionAttribute());
++        return new TransactionInterceptor(manager, source);
++    }
++
++    @Bean
++    public static BeanNameAutoProxyCreator domainTransactions() {
++        var proxy = new BeanNameAutoProxyCreator();
++        proxy.setBeanNames("authService", "artisanService", "productService", "categoryService",
++                "batchService", "traceService", "quoteService", "cartService", "orderService",
++                "reviewService", "newsService", "adminService");
++        proxy.setInterceptorNames("domainTransactionInterceptor");
++        proxy.setProxyTargetClass(true);
++        return proxy;
++    }
++}
+--- a/src/main/java/com/vcraft/domain/model/NewsType.java
++++ b/src/main/java/com/vcraft/domain/model/NewsType.java
+@@ -10,7 +10,7 @@
+         try {
+             return NewsType.valueOf(val.toUpperCase());
+         } catch (IllegalArgumentException e) {
+-            return POLICY;
++            throw new com.vcraft.domain.exception.InvalidInputException("Loại tin không hợp lệ");
+         }
+     }
+ }
+--- a/src/main/java/com/vcraft/domain/model/QuoteStatus.java
++++ b/src/main/java/com/vcraft/domain/model/QuoteStatus.java
+@@ -2,6 +2,7 @@
+ 
+ public enum QuoteStatus {
+     DRAFT,
++    ALLOCATED,
+     SENT,
+     BIDDING,
+     ACCEPTED,
+--- a/src/main/java/com/vcraft/domain/repository/QuoteRepository.java
++++ b/src/main/java/com/vcraft/domain/repository/QuoteRepository.java
+@@ -9,6 +9,8 @@
+ public interface QuoteRepository {
+     Optional<QuoteRequest> findById(UUID id);
+     QuoteRequest save(QuoteRequest quote);
++    void linkAllocation(UUID parentId, UUID childId);
++    List<QuoteRequest> findAllocations(UUID parentId);
+     void deleteById(UUID id);
+     List<QuoteRequest> findByBuyerId(UUID buyerId, QuoteStatus status, int page, int limit);
+     long countByBuyerId(UUID buyerId, QuoteStatus status);
+--- a/src/main/java/com/vcraft/domain/service/AdminService.java
++++ b/src/main/java/com/vcraft/domain/service/AdminService.java
+@@ -56,6 +56,9 @@
+                 artisan.familyHistory(), artisan.certificates(), artisan.images(),
+                 ArtisanStatus.APPROVED, null, artisan.createdAt(), Instant.now()
+         );
++        userRepository.findById(artisan.userId()).ifPresent(u -> userRepository.save(new User(
++                u.id(), u.email(), u.passwordHash(), u.fullName(), u.phone(), u.role(),
++                UserStatus.ACTIVE, u.createdAt(), Instant.now())));
+         return artisanRepository.save(approved);
+     }
+ 
+@@ -115,6 +118,9 @@
+         User user = userRepository.findById(userId)
+                 .orElseThrow(() -> new NotFoundException("Không tìm thấy người dùng"));
+ 
++        if (user.role() == com.vcraft.domain.model.Role.ARTISAN) {
++            artisanRepository.findByUserId(user.id()).ifPresent(a -> blockArtisan(caller, a.id(), reason));
++        }
+         User blocked = new User(
+                 user.id(), user.email(), user.passwordHash(), user.fullName(), user.phone(),
+                 user.role(), UserStatus.BLOCKED, user.createdAt(), Instant.now()
+@@ -124,16 +130,20 @@
+ 
+     public List<QuoteRequest> getAllQuotes(Caller caller, String status, int page, int limit) {
+         caller.requireAdmin();
+-        QuoteStatus quoteStatus = status != null && !status.isBlank() ? QuoteStatus.valueOf(status.toUpperCase()) : null;
++        QuoteStatus quoteStatus = status != null && !status.isBlank() ? parseStatus(status) : null;
+         return quoteRepository.findAll(quoteStatus, page, limit);
+     }
+ 
+     public long countAllQuotes(Caller caller, String status) {
+         caller.requireAdmin();
+-        QuoteStatus quoteStatus = status != null && !status.isBlank() ? QuoteStatus.valueOf(status.toUpperCase()) : null;
++        QuoteStatus quoteStatus = status != null && !status.isBlank() ? parseStatus(status) : null;
+         return quoteRepository.countAll(quoteStatus);
+     }
+ 
++    private QuoteStatus parseStatus(String value) {
++        try { return QuoteStatus.valueOf(value.toUpperCase()); }
++        catch (IllegalArgumentException ex) { throw new com.vcraft.domain.exception.InvalidInputException("Trạng thái báo giá không hợp lệ"); }
++    }
+     public Map<String, Object> getDashboardStats(Caller caller) {
+         caller.requireAdmin();
+         long totalArtisans = artisanRepository.countApproved(null, null);
+--- a/src/main/java/com/vcraft/domain/service/ArtisanService.java
++++ b/src/main/java/com/vcraft/domain/service/ArtisanService.java
+@@ -27,6 +27,7 @@
+ 
+     public ArtisanProfile getArtisanDetail(UUID id) {
+         return artisanRepository.findById(id)
++                .filter(ArtisanProfile::isApproved)
+                 .orElseThrow(() -> new NotFoundException("Không tìm thấy thông tin xưởng gốm"));
+     }
+ 
+@@ -40,6 +41,8 @@
+                                           String address, Double lat, Double lng, Boolean openStatus,
+                                           List<String> images, String familyHistory, List<String> certificates) {
+         ArtisanProfile current = getMyProfile(caller);
++        validateLocation(lat, lng);
++        if (workshopName != null && workshopName.isBlank()) throw new com.vcraft.domain.exception.InvalidInputException("Tên xưởng không được trống");
+ 
+         ArtisanProfile updated = new ArtisanProfile(
+                 current.id(),
+@@ -91,6 +94,7 @@
+     }
+ 
+     public ArtisanProfile updateLocation(Caller caller, Double lat, Double lng, String address) {
++        validateLocation(lat, lng);
+         ArtisanProfile current = getMyProfile(caller);
+         ArtisanProfile updated = new ArtisanProfile(
+                 current.id(),
+@@ -115,6 +119,11 @@
+         return artisanRepository.save(updated);
+     }
+ 
++    private void validateLocation(Double lat, Double lng) {
++        if ((lat != null && (!Double.isFinite(lat) || lat < -90 || lat > 90))
++                || (lng != null && (!Double.isFinite(lng) || lng < -180 || lng > 180)))
++            throw new com.vcraft.domain.exception.InvalidInputException("Tọa độ xưởng không hợp lệ");
++    }
+     public List<ArtisanProfile> getMapPins(boolean openOnly) {
+         return artisanRepository.findAllForMap(openOnly);
+     }
+--- a/src/main/java/com/vcraft/domain/service/AuthService.java
++++ b/src/main/java/com/vcraft/domain/service/AuthService.java
+@@ -39,6 +39,7 @@
+     }
+ 
+     public AuthResult registerBuyer(String name, String email, String rawPassword, String phone) {
++        email = email.toLowerCase().trim();
+         if (userRepository.existsByEmail(email)) {
+             throw new ConflictException("Email đã được đăng ký trong hệ thống");
+         }
+@@ -65,6 +66,10 @@
+     public ArtisanProfile registerArtisan(String workshopName, String ownerName, String email,
+                                           String phone, String address, Double lat, Double lng,
+                                           String description, List<String> certificates, String rawPassword) {
++        if ((lat != null && (!Double.isFinite(lat) || lat < -90 || lat > 90))
++                || (lng != null && (!Double.isFinite(lng) || lng < -180 || lng > 180)))
++            throw new InvalidInputException("Tọa độ xưởng không hợp lệ");
++        email = email.toLowerCase().trim();
+         if (userRepository.existsByEmail(email)) {
+             throw new ConflictException("Email đã được đăng ký trong hệ thống");
+         }
+@@ -72,7 +77,7 @@
+         User user = new User(
+                 UUID.randomUUID(),
+                 email.toLowerCase().trim(),
+-                passwordHasher.hash(rawPassword != null ? rawPassword : "Artisan@" + System.currentTimeMillis()),
++                passwordHasher.hash(rawPassword),
+                 ownerName,
+                 phone,
+                 Role.ARTISAN,
+--- a/src/main/java/com/vcraft/domain/service/BatchService.java
++++ b/src/main/java/com/vcraft/domain/service/BatchService.java
+@@ -1,428 +1,206 @@
+ package com.vcraft.domain.service;
+-
+-
+-
+ import com.vcraft.domain.exception.ForbiddenException;
+-
+ import com.vcraft.domain.exception.NotFoundException;
+-
+ import com.vcraft.domain.model.ArtisanProfile;
+-
+ import com.vcraft.domain.model.ArtisanStatus;
+-
+ import com.vcraft.domain.model.Batch;
+-
+ import com.vcraft.domain.model.BatchStatus;
+-
+ import com.vcraft.domain.model.Caller;
+-
+ import com.vcraft.domain.model.ProductionLog;
+-
+ import com.vcraft.domain.repository.ArtisanRepository;
+-
+ import com.vcraft.domain.repository.BatchRepository;
+-
+ import com.vcraft.domain.repository.ProductionLogRepository;
+-
+ import java.time.Instant;
+-
+ import java.util.ArrayList;
+-
+ import java.util.List;
+-
+ import java.util.UUID;
+-
+-
+-
+ public class BatchService {
+-
+-
+-
+     private final BatchRepository batchRepository;
+-
+     private final ProductionLogRepository logRepository;
+-
+     private final ArtisanRepository artisanRepository;
+-
+     private final QrCodeGenerator qrCodeGenerator;
+-
+     private final String frontendUrl;
+-
+-
+-
+     public BatchService(BatchRepository batchRepository,
+-
+                         ProductionLogRepository logRepository,
+-
+                         ArtisanRepository artisanRepository,
+-
+                         QrCodeGenerator qrCodeGenerator,
+-
+                         String frontendUrl) {
+-
+         this.batchRepository = batchRepository;
+-
+         this.logRepository = logRepository;
+-
+         this.artisanRepository = artisanRepository;
+-
+         this.qrCodeGenerator = qrCodeGenerator;
+-
+         this.frontendUrl = frontendUrl != null ? frontendUrl : "http://localhost:3000";
+-
+-    }
+-
+-
+-
++    }
+     public List<Batch> getMyBatches(Caller caller, String status, int page, int limit) {
+-
+-        UUID userId = caller.requireUserId();
+-
+-        ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+-
++        UUID userId = caller.requireUserId();
++        ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+                 .orElseThrow(() -> new ForbiddenException("Chưa có hồ sơ xưởng gốm"));
+-
+         return batchRepository.findByArtisanId(artisan.id(), status, page, limit);
+-
+-    }
+-
+-
+-
++    }
+     public long countMyBatches(Caller caller, String status) {
+-
+-        UUID userId = caller.requireUserId();
+-
+-        ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+-
++        UUID userId = caller.requireUserId();
++        ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+                 .orElseThrow(() -> new ForbiddenException("Chưa có hồ sơ xưởng gốm"));
+-
+         return batchRepository.countByArtisanId(artisan.id(), status);
+-
+-    }
+-
+-
+-
++    }
+     public Batch getBatchDetail(UUID id) {
+-
+         return batchRepository.findById(id)
+-
+                 .orElseThrow(() -> new NotFoundException("Không tìm thấy lô sản xuất"));
+-
+-    }
+-
+-
+-
++    }
+     public Batch createBatch(Caller caller, String name, String description, int quantity) {
+-
+-        UUID userId = caller.requireUserId();
+-
+-        ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+-
++        UUID userId = caller.requireUserId();
++        ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+                 .orElseThrow(() -> new ForbiddenException("Chỉ nghệ nhân mới được tạo lô sản xuất"));
+-
+-
+-
+         if (artisan.status() != ArtisanStatus.APPROVED) {
+-
+             throw new ForbiddenException("Hồ sơ xưởng gốm của bạn đang chờ duyệt hoặc đã bị khóa. Chỉ nghệ nhân được duyệt mới có thể tạo lô sản xuất.");
+-
+         }
+-
+-
+-
++        if (name == null || name.isBlank() || quantity <= 0)
++            throw new com.vcraft.domain.exception.InvalidInputException("Tên lô và số lượng không hợp lệ");
+         UUID batchId = UUID.randomUUID();
+-
+         String qrToken = UUID.randomUUID().toString().replace("-", "");
+-
+         String traceUrl = frontendUrl + "/trace/" + batchId;
+-
+         String qrCodeUrl = qrCodeGenerator.generateQrCode(traceUrl, "qr_batch_" + batchId);
+-
+-
+-
+         Batch batch = new Batch(
+-
+                 batchId,
+-
+                 artisan.id(),
+-
+                 name,
+-
+                 description,
+-
+                 quantity > 0 ? quantity : 1,
+-
+                 BatchStatus.IN_PROGRESS,
+-
+                 qrCodeUrl,
+-
+                 qrToken,
+-
+                 Instant.now(),
+-
+-                Instant.now()
+-
+-        );
+-
++                Instant.now()
++        );
+         return batchRepository.save(batch);
+-
+-    }
+-
+-
+-
++    }
+     public Batch updateBatch(Caller caller, UUID batchId, String name, String description, String status) {
+-
+         Batch current = getBatchDetail(batchId);
+-
+         checkArtisanOwnership(caller, current.artisanId());
+-
+-
+-
++        if (name != null && name.isBlank()) throw new com.vcraft.domain.exception.InvalidInputException("Tên lô không được trống");
+         BatchStatus newStatus = current.status();
+-
+         if (status != null) {
+-
+             try {
+-
+                 newStatus = BatchStatus.valueOf(status.toUpperCase());
+-
+-            } catch (Exception ignored) {}
+-
++            } catch (IllegalArgumentException ex) {
++                throw new com.vcraft.domain.exception.InvalidInputException("Trạng thái lô không hợp lệ");
++            }
+         }
+-
+-
+-
+         Batch updated = new Batch(
+-
+-                current.id(),
+-
++                current.id(),
+                 current.artisanId(),
+-
+                 name != null ? name : current.name(),
+-
+                 description != null ? description : current.description(),
+-
+                 current.quantity(),
+-
+                 newStatus,
+-
+                 current.qrCodeUrl(),
+-
+                 current.qrToken(),
+-
+                 current.createdAt(),
+-
+-                Instant.now()
+-
+-        );
+-
++                Instant.now()
++        );
+         return batchRepository.save(updated);
+-
+-    }
+-
+-
+-
++    }
+     public Batch regenerateQr(Caller caller, UUID batchId) {
+-
+         Batch current = getBatchDetail(batchId);
+-
+         checkArtisanOwnership(caller, current.artisanId());
+-
+-
+-
+         String newQrToken = UUID.randomUUID().toString().replace("-", "");
+-
+         String traceUrl = frontendUrl + "/trace/" + batchId;
+-
+         String qrCodeUrl = qrCodeGenerator.generateQrCode(traceUrl, "qr_batch_" + batchId + "_" + System.currentTimeMillis());
+-
+-
+-
+         Batch updated = new Batch(
+-
+-                current.id(),
+-
++                current.id(),
+                 current.artisanId(),
+-
+                 current.name(),
+-
+                 current.description(),
+-
+                 current.quantity(),
+-
+                 current.status(),
+-
+                 qrCodeUrl,
+-
+                 newQrToken,
+-
+                 current.createdAt(),
+-
+-                Instant.now()
+-
+-        );
+-
++                Instant.now()
++        );
+         return batchRepository.save(updated);
+-
+-    }
+-
+-
+-
++    }
+     // Production Logs
+-
+     public ProductionLog addLog(Caller caller, UUID batchId, String stage, String note, List<String> images, Instant timestamp) {
+-
+-        Batch batch = getBatchDetail(batchId);
+-
+-        checkArtisanOwnership(caller, batch.artisanId());
+-
+-
+-
++        Batch batch = getBatchDetail(batchId);
++        checkArtisanOwnership(caller, batch.artisanId());
+         ProductionLog log = new ProductionLog(
+-
+                 UUID.randomUUID(),
+-
+                 batchId,
+-
+                 stage,
+-
+                 note,
+-
+                 images != null ? images : List.of(),
+-
+                 timestamp != null ? timestamp : Instant.now(),
+-
+-                Instant.now()
+-
+-        );
+-
++                Instant.now()
++        );
+         return logRepository.save(log);
+-
+-    }
+-
+-
+-
++    }
+     public List<ProductionLog> getLogs(UUID batchId) {
+-
+         // Public endpoint qua QR code
+-
+         return logRepository.findByBatchIdOrderByLoggedAtAsc(batchId);
+-
+-    }
+-
+-
+-
++    }
+     public ProductionLog updateLog(Caller caller, UUID batchId, UUID logId, String note, List<String> images) {
+-
+-        Batch batch = getBatchDetail(batchId);
+-
+-        checkArtisanOwnership(caller, batch.artisanId());
+-
+-
+-
++        Batch batch = getBatchDetail(batchId);
++        checkArtisanOwnership(caller, batch.artisanId());
+         ProductionLog current = logRepository.findById(logId)
+-
+                 .orElseThrow(() -> new NotFoundException("Không tìm thấy nhật ký sản xuất"));
+-
+-
+-
++        checkLogBatch(current, batchId);
+         ProductionLog updated = new ProductionLog(
+-
+-                current.id(),
+-
++                current.id(),
+                 current.batchId(),
+-
+                 current.stage(),
+-
+                 note != null ? note : current.note(),
+-
+                 images != null ? images : current.images(),
+-
+                 current.loggedAt(),
+-
+                 current.createdAt()
+-
+-        );
+-
++        );
+         return logRepository.save(updated);
+-
+-    }
+-
+-
+-
++    }
+     public void deleteLog(Caller caller, UUID batchId, UUID logId) {
+-
+-        Batch batch = getBatchDetail(batchId);
+-
+-        checkArtisanOwnership(caller, batch.artisanId());
+-
++        Batch batch = getBatchDetail(batchId);
++        checkArtisanOwnership(caller, batch.artisanId());
++        ProductionLog current = logRepository.findById(logId)
++                .orElseThrow(() -> new NotFoundException("Không tìm thấy nhật ký"));
++        checkLogBatch(current, batchId);
+         logRepository.deleteById(logId);
+-
+-    }
+-
+-
+-
++    }
+     public void addLogImages(Caller caller, UUID batchId, UUID logId, List<String> newImages) {
+-
+-        Batch batch = getBatchDetail(batchId);
+-
+-        checkArtisanOwnership(caller, batch.artisanId());
+-
+-
+-
++        Batch batch = getBatchDetail(batchId);
++        checkArtisanOwnership(caller, batch.artisanId());
+         ProductionLog current = logRepository.findById(logId)
+-
+                 .orElseThrow(() -> new NotFoundException("Không tìm thấy mốc nhật ký"));
+-
+-
+-
++        checkLogBatch(current, batchId);
+         List<String> images = new ArrayList<>(current.images() != null ? current.images() : List.of());
+-
+         images.addAll(newImages);
+-
+-
+-
++        checkLogBatch(current, batchId);
+         ProductionLog updated = new ProductionLog(
+-
+-                current.id(),
+-
++                current.id(),
+                 current.batchId(),
+-
+                 current.stage(),
+-
+                 current.note(),
+-
+                 images,
+-
+                 current.loggedAt(),
+-
+                 current.createdAt()
+-
+-        );
+-
++        );
+         logRepository.save(updated);
+-
+-    }
+-
+-
+-
++    }
++    public void authorizeLogImageUpload(Caller caller, UUID batchId, UUID logId) {
++        checkArtisanOwnership(caller, getBatchDetail(batchId).artisanId());
++        var log = logRepository.findById(logId).orElseThrow(() -> new NotFoundException("Không tìm thấy nhật ký"));
++        checkLogBatch(log, batchId);
++    }
++    private void checkLogBatch(ProductionLog log, UUID batchId) {
++        if (!log.batchId().equals(batchId)) throw new ForbiddenException("Nhật ký không thuộc lô này");
++    }
+     private void checkArtisanOwnership(Caller caller, UUID artisanId) {
+-
+         if (caller.isAdmin()) return;
+-
+-        UUID userId = caller.requireUserId();
+-
+-        ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+-
++        UUID userId = caller.requireUserId();
++        ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+                 .orElseThrow(() -> new ForbiddenException("Bạn không có quyền thao tác trên lô sản xuất này"));
+-
++        if (artisan.status() != ArtisanStatus.APPROVED)
++            throw new ForbiddenException("Xưởng chưa được duyệt hoặc đã bị khóa");
+         if (!artisan.id().equals(artisanId)) {
+-
+             throw new ForbiddenException("Lô sản xuất không thuộc xưởng của bạn");
+-
+         }
+-
+-    }
+-
++    }
+ }
+-
+--- a/src/main/java/com/vcraft/domain/service/CartService.java
++++ b/src/main/java/com/vcraft/domain/service/CartService.java
+@@ -34,7 +34,10 @@
+         Product product = productRepository.findById(productId)
+                 .orElseThrow(() -> new NotFoundException("Sản phẩm không tồn tại"));
+ 
+-        cartRepository.addItem(cart.id(), product.id(), quantity > 0 ? quantity : 1);
++        long current = cart.items().stream().filter(i -> i.productId().equals(productId)).mapToLong(i -> i.quantity()).sum();
++        if (quantity <= 0 || current + quantity > product.stock())
++            throw new com.vcraft.domain.exception.InvalidInputException("Số lượng phải dương và không vượt tồn kho");
++        cartRepository.addItem(cart.id(), product.id(), quantity);
+         return getOrCreateCart(caller);
+     }
+ 
+--- a/src/main/java/com/vcraft/domain/service/NewsService.java
++++ b/src/main/java/com/vcraft/domain/service/NewsService.java
+@@ -52,6 +52,8 @@
+     public News updateNews(Caller caller, UUID id, String title, String content, String type) {
+         caller.requireAdmin();
+         News current = getNewsDetail(id);
++        if ((title != null && title.isBlank()) || (content != null && content.isBlank()))
++            throw new com.vcraft.domain.exception.InvalidInputException("Tiêu đề và nội dung không được trống");
+ 
+         News updated = new News(
+                 current.id(),
+--- a/src/main/java/com/vcraft/domain/service/OrderService.java
++++ b/src/main/java/com/vcraft/domain/service/OrderService.java
+@@ -1,392 +1,181 @@
+ package com.vcraft.domain.service;
+-
+-
+-
+ import com.vcraft.domain.exception.ConflictException;
+-
+ import com.vcraft.domain.exception.ForbiddenException;
+-
+ import com.vcraft.domain.exception.InvalidInputException;
+-
+ import com.vcraft.domain.exception.NotFoundException;
+-
+ import com.vcraft.domain.model.ArtisanProfile;
+-
+ import com.vcraft.domain.model.Caller;
+-
+ import com.vcraft.domain.model.Cart;
+-
+ import com.vcraft.domain.model.Order;
+-
+ import com.vcraft.domain.model.OrderItem;
+-
+ import com.vcraft.domain.model.OrderStatus;
+-
+ import com.vcraft.domain.model.Product;
+-
+ import com.vcraft.domain.repository.ArtisanRepository;
+-
+ import com.vcraft.domain.repository.CartRepository;
+-
+ import com.vcraft.domain.repository.OrderRepository;
+-
+ import com.vcraft.domain.repository.ProductRepository;
+-
+ import java.math.BigDecimal;
+-
+ import java.time.Instant;
+-
+ import java.util.ArrayList;
+-
+ import java.util.List;
+-
+ import java.util.UUID;
+-
+-
+-
+ public class OrderService {
+-
+-
+-
+     private final OrderRepository orderRepository;
+-
+     private final CartRepository cartRepository;
+-
+     private final ProductRepository productRepository;
+-
+     private final ArtisanRepository artisanRepository;
+-
+-
+-
+     public OrderService(OrderRepository orderRepository,
+-
+                         CartRepository cartRepository,
+-
+                         ProductRepository productRepository,
+-
+                         ArtisanRepository artisanRepository) {
+-
+         this.orderRepository = orderRepository;
+-
+         this.cartRepository = cartRepository;
+-
+         this.productRepository = productRepository;
+-
+         this.artisanRepository = artisanRepository;
+-
+     }
+-
+-
+-
+     public Order createOrderFromCart(Caller caller, String shippingAddress, String paymentMethod, String note) {
+-
+         UUID buyerId = caller.requireUserId();
+-
+         Cart cart = cartRepository.findByUserId(buyerId)
+-
+                 .orElseThrow(() -> new InvalidInputException("Giỏ hàng của bạn đang trống"));
+-
+-
+-
+         if (cart.items() == null || cart.items().isEmpty()) {
+-
+             throw new InvalidInputException("Giỏ hàng của bạn đang trống");
+-
+         }
+-
+-
+-
+         UUID orderId = UUID.randomUUID();
+-
+         List<OrderItem> orderItems = new ArrayList<>();
+-
+         BigDecimal totalAmount = BigDecimal.ZERO;
+-
+-
+-
+-        for (var item : cart.items()) {
+-
++        for (var item : cart.items().stream().sorted(java.util.Comparator.comparing(i -> i.productId().toString())).toList()) {
+             Product product = productRepository.findById(item.productId())
+-
+                     .orElseThrow(() -> new NotFoundException("Sản phẩm không còn tồn tại"));
+-
+-
+-
++            if (item.quantity() <= 0 || product.stock() < item.quantity())
++                throw new ConflictException("Số lượng đặt vượt tồn kho");
++            changeStock(product, -item.quantity());
+             BigDecimal lineTotal = product.price().multiply(BigDecimal.valueOf(item.quantity()));
+-
+             totalAmount = totalAmount.add(lineTotal);
+-
+-
+-
+             orderItems.add(new OrderItem(
+-
+                     UUID.randomUUID(),
+-
+                     orderId,
+-
+                     product.id(),
+-
+                     product.artisanId(),
+-
+                     product.name(),
+-
+                     product.price(),
+-
+                     item.quantity()
+-
+             ));
+-
+         }
+-
+-
+-
+         Order order = new Order(
+-
+                 orderId,
+-
+                 buyerId,
+-
+                 shippingAddress,
+-
+                 paymentMethod != null ? paymentMethod : "COD",
+-
+                 note,
+-
+                 OrderStatus.PENDING,
+-
+                 totalAmount,
+-
+                 null,
+-
+                 orderItems,
+-
+                 Instant.now(),
+-
+                 Instant.now()
+-
+         );
+-
+-
+-
+         Order saved = orderRepository.save(order);
+-
+         cartRepository.clearCart(cart.id());
+-
+         return saved;
+-
+     }
+-
+-
+-
+     public List<Order> getBuyerOrders(Caller caller, String status, int page, int limit) {
+-
+         UUID buyerId = caller.requireUserId();
+-
+         OrderStatus orderStatus = parseStatus(status);
+-
+         return orderRepository.findByBuyerId(buyerId, orderStatus, page, limit);
+-
+     }
+-
+-
+-
+     public long countBuyerOrders(Caller caller, String status) {
+-
+         UUID buyerId = caller.requireUserId();
+-
+         OrderStatus orderStatus = parseStatus(status);
+-
+         return orderRepository.countByBuyerId(buyerId, orderStatus);
+-
+     }
+-
+-
+-
+     public Order getOrderDetail(Caller caller, UUID orderId) {
+-
+         Order order = orderRepository.findById(orderId)
+-
+                 .orElseThrow(() -> new NotFoundException("Không tìm thấy đơn hàng"));
+-
+-
+-
+         // Check permission: buyer, or artisan owning one of the items, or admin
+-
+         if (!caller.isAdmin() && !order.buyerId().equals(caller.requireUserId())) {
+-
+             UUID userId = caller.requireUserId();
+-
+             ArtisanProfile artisan = artisanRepository.findByUserId(userId).orElse(null);
+-
+             boolean ownsItem = artisan != null && order.items().stream()
+-
+                     .anyMatch(i -> i.artisanId().equals(artisan.id()));
+-
+             if (!ownsItem) {
+-
+                 throw new ForbiddenException("Bạn không có quyền xem đơn hàng này");
+-
+             }
+-
+         }
+-
+-
+-
+         return order;
+-
+     }
+-
+-
+-
+     public Order cancelOrder(Caller caller, UUID orderId, String reason) {
+-
+         Order order = orderRepository.findById(orderId)
+-
+                 .orElseThrow(() -> new NotFoundException("Không tìm thấy đơn hàng"));
+-
+-
+-
+         if (!order.buyerId().equals(caller.requireUserId())) {
+-
+             throw new ForbiddenException("Chỉ người đặt hàng mới có thể hủy đơn này");
+-
+         }
+-
+-
+-
+         if (order.status() != OrderStatus.PENDING) {
+-
+             throw new ConflictException("Đơn hàng đã được xác nhận hoặc đang vận chuyển, không thể hủy");
+-
+         }
+-
+-
+-
++        for (var item : order.items()) {
++            var product = productRepository.findById(item.productId()).orElseThrow(() -> new NotFoundException("Không tìm thấy sản phẩm"));
++            changeStock(product, item.quantity());
++        }
+         Order updated = new Order(
+-
+                 order.id(), order.buyerId(), order.shippingAddress(), order.paymentMethod(),
+-
+                 order.note(), OrderStatus.CANCELLED, order.totalAmount(), reason,
+-
+                 order.items(), order.createdAt(), Instant.now()
+-
+         );
+-
+         return orderRepository.save(updated);
+-
+     }
+-
+-
+-
+     public List<Order> getArtisanOrders(Caller caller, String status, int page, int limit) {
+-
+         UUID userId = caller.requireUserId();
+-
+         ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+-
+                 .orElseThrow(() -> new ForbiddenException("Chưa có hồ sơ nghệ nhân"));
+-
+-
+-
+         OrderStatus orderStatus = parseStatus(status);
+-
+         return orderRepository.findByArtisanId(artisan.id(), orderStatus, page, limit);
+-
+     }
+-
+-
+-
+     public long countArtisanOrders(Caller caller, String status) {
+-
+         UUID userId = caller.requireUserId();
+-
+         ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+-
+                 .orElseThrow(() -> new ForbiddenException("Chưa có hồ sơ nghệ nhân"));
+-
+-
+-
+         OrderStatus orderStatus = parseStatus(status);
+-
+         return orderRepository.countByArtisanId(artisan.id(), orderStatus);
+-
+     }
+-
+-
+-
+     public Order updateOrderStatus(Caller caller, UUID orderId, String newStatus, String note) {
+-
+         caller.requireArtisan();
+-
+         Order order = orderRepository.findById(orderId)
+-
+                 .orElseThrow(() -> new NotFoundException("Không tìm thấy đơn hàng"));
+-
+-
+-
+         if (!caller.isAdmin()) {
+-
+             UUID userId = caller.requireUserId();
+-
+             ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+-
+                     .orElseThrow(() -> new ForbiddenException("Chưa có hồ sơ nghệ nhân"));
+-
+-            boolean ownsItem = order.items().stream()
+-
+-                    .anyMatch(i -> i.artisanId().equals(artisan.id()));
+-
++            boolean ownsItem = !order.items().isEmpty() && order.items().stream()
++                    .allMatch(i -> i.artisanId().equals(artisan.id()));
+             if (!ownsItem) {
+-
+-                throw new ForbiddenException("Đơn hàng không chứa sản phẩm thuộc xưởng của bạn");
+-
++                throw new ForbiddenException("Đơn hàng không chứa sản phẩm thuộc xưởng của bạn hoặc có nhiều xưởng; cần BQL cập nhật trạng thái");
+             }
+-
+         }
+-
+-
+-
+         OrderStatus status = parseStatus(newStatus);
+-
+         if (status == null) {
+-
+             throw new InvalidInputException("Trạng thái đơn hàng không hợp lệ");
+-
+         }
+-
+-
+-
++        boolean valid = (order.status() == OrderStatus.PENDING && status == OrderStatus.CONFIRMED)
++                || (order.status() == OrderStatus.CONFIRMED && status == OrderStatus.SHIPPING)
++                || (order.status() == OrderStatus.SHIPPING && status == OrderStatus.DELIVERED);
++        if (!valid) throw new ConflictException("Chuyển trạng thái đơn hàng không hợp lệ");
+         Order updated = new Order(
+-
+                 order.id(), order.buyerId(), order.shippingAddress(), order.paymentMethod(),
+-
+                 note != null ? note : order.note(), status, order.totalAmount(),
+-
+                 order.cancelReason(), order.items(), order.createdAt(), Instant.now()
+-
+         );
+-
+         return orderRepository.save(updated);
+-
+     }
+-
+-
+-
++    private void changeStock(Product p, int delta) {
++        productRepository.save(new Product(p.id(), p.artisanId(), p.categoryId(), p.batchId(), p.name(),
++                p.description(), p.price(), Math.addExact(p.stock(), delta), p.images(), p.createdAt(), Instant.now()));
++    }
+     private OrderStatus parseStatus(String status) {
+-
+         if (status == null || status.isBlank()) return null;
+-
+         try {
+-
+             return OrderStatus.valueOf(status.toUpperCase());
+-
+-        } catch (Exception e) {
+-
+-            return null;
+-
++        } catch (IllegalArgumentException e) {
++            throw new InvalidInputException("Trạng thái đơn hàng không hợp lệ");
+         }
+-
+     }
+-
+ }
+-
+--- a/src/main/java/com/vcraft/domain/service/ProductService.java
++++ b/src/main/java/com/vcraft/domain/service/ProductService.java
+@@ -1,258 +1,131 @@
+ package com.vcraft.domain.service;
+-
+-
+-
+ import com.vcraft.domain.exception.ForbiddenException;
+-
+ import com.vcraft.domain.exception.NotFoundException;
+-
+ import com.vcraft.domain.model.ArtisanProfile;
+-
+ import com.vcraft.domain.model.ArtisanStatus;
+-
+ import com.vcraft.domain.model.Caller;
+-
+ import com.vcraft.domain.model.Product;
+-
+ import com.vcraft.domain.repository.ArtisanRepository;
+-
+ import com.vcraft.domain.repository.ProductRepository;
+-
+ import java.math.BigDecimal;
+-
+ import java.time.Instant;
+-
+ import java.util.ArrayList;
+-
+ import java.util.List;
+-
+ import java.util.UUID;
+-
+-
+-
+ public class ProductService {
+-
+-
+-
+     private final ProductRepository productRepository;
+-
+     private final ArtisanRepository artisanRepository;
+-
+-
+-
++    private com.vcraft.domain.repository.BatchRepository batches;
+     public ProductService(ProductRepository productRepository, ArtisanRepository artisanRepository) {
+-
+         this.productRepository = productRepository;
+-
+         this.artisanRepository = artisanRepository;
+-
+     }
+-
+-
+-
++    public ProductService(ProductRepository products, ArtisanRepository artisans, com.vcraft.domain.repository.BatchRepository batches) {
++        this(products, artisans);
++        this.batches = batches;
++    }
+     public List<Product> getProducts(UUID artisanId, UUID categoryId, BigDecimal minPrice, BigDecimal maxPrice,
+-
+                                     int page, int limit, String sort) {
+-
+         return productRepository.findProducts(artisanId, categoryId, minPrice, maxPrice, page, limit, sort);
+-
+     }
+-
+-
+-
+     public long countProducts(UUID artisanId, UUID categoryId, BigDecimal minPrice, BigDecimal maxPrice) {
+-
+         return productRepository.countProducts(artisanId, categoryId, minPrice, maxPrice);
+-
+     }
+-
+-
+-
+     public Product getProductDetail(UUID id) {
+-
+         return productRepository.findById(id)
+-
+                 .orElseThrow(() -> new NotFoundException("Không tìm thấy sản phẩm gốm"));
+-
+     }
+-
+-
+-
+     public Product createProduct(Caller caller, String name, String description, BigDecimal price,
+-
+                                  int stock, UUID categoryId, List<String> images, UUID batchId) {
+-
+         UUID userId = caller.requireUserId();
+-
+         ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+-
+                 .orElseThrow(() -> new ForbiddenException("Chỉ tài khoản nghệ nhân đã có xưởng mới được đăng sản phẩm"));
+-
+-
+-
+         if (artisan.status() != ArtisanStatus.APPROVED) {
+-
+             throw new ForbiddenException("Hồ sơ xưởng gốm của bạn đang chờ BQL duyệt hoặc đã bị từ chối. Chỉ xưởng đã được duyệt mới có thể đăng sản phẩm.");
+-
+         }
+-
+-
+-
++        if (batchId != null && batches != null) {
++            var batch = batches.findById(batchId).orElseThrow(() -> new NotFoundException("Không tìm thấy lô sản xuất"));
++            if (!batch.artisanId().equals(artisan.id())) throw new ForbiddenException("Lô sản xuất không thuộc xưởng của bạn");
++        }
++        validateValues(price, stock);
+         Product product = new Product(
+-
+                 UUID.randomUUID(),
+-
+                 artisan.id(),
+-
+                 categoryId,
+-
+                 batchId,
+-
+                 name,
+-
+                 description,
+-
+                 price,
+-
+                 stock,
+-
+                 images != null ? images : List.of(),
+-
+                 Instant.now(),
+-
+                 Instant.now()
+-
+         );
+-
+         return productRepository.save(product);
+-
+     }
+-
+-
+-
+     public Product updateProduct(Caller caller, UUID productId, String name, String description,
+-
+-                                 BigDecimal price, int stock, List<String> images) {
+-
++                                 BigDecimal price, Integer stock, List<String> images) {
+         Product current = getProductDetail(productId);
+-
+         checkArtisanOwnership(caller, current.artisanId());
+-
+-
+-
++        if (name != null && name.isBlank()) throw new com.vcraft.domain.exception.InvalidInputException("Tên sản phẩm không được trống");
++        validateValues(price != null ? price : current.price(), stock != null ? stock : current.stock());
+         Product updated = new Product(
+-
+                 current.id(),
+-
+                 current.artisanId(),
+-
+                 current.categoryId(),
+-
+                 current.batchId(),
+-
+                 name != null ? name : current.name(),
+-
+                 description != null ? description : current.description(),
+-
+                 price != null ? price : current.price(),
+-
+-                stock,
+-
++                stock != null ? stock : current.stock(),
+                 images != null ? images : current.images(),
+-
+                 current.createdAt(),
+-
+                 Instant.now()
+-
+         );
+-
+         return productRepository.save(updated);
+-
+     }
+-
+-
+-
+     public void deleteProduct(Caller caller, UUID productId) {
+-
+         Product current = getProductDetail(productId);
+-
+         checkArtisanOwnership(caller, current.artisanId());
+-
+         productRepository.deleteById(productId);
+-
+     }
+-
+-
+-
+     public void addProductImages(Caller caller, UUID productId, List<String> newImages) {
+-
+         Product current = getProductDetail(productId);
+-
+         checkArtisanOwnership(caller, current.artisanId());
+-
+-
+-
+         List<String> images = new ArrayList<>(current.images() != null ? current.images() : List.of());
+-
+         images.addAll(newImages);
+-
+-
+-
+         Product updated = new Product(
+-
+                 current.id(),
+-
+                 current.artisanId(),
+-
+                 current.categoryId(),
+-
+                 current.batchId(),
+-
+                 current.name(),
+-
+                 current.description(),
+-
+                 current.price(),
+-
+                 current.stock(),
+-
+                 images,
+-
+                 current.createdAt(),
+-
+                 Instant.now()
+-
+         );
+-
+         productRepository.save(updated);
+-
+     }
+-
+-
+-
++    public void authorizeImageUpload(Caller caller, UUID productId) {
++        checkArtisanOwnership(caller, getProductDetail(productId).artisanId());
++    }
++    private void validateValues(BigDecimal price, int stock) {
++        if (price == null || price.signum() <= 0 || stock < 0)
++            throw new com.vcraft.domain.exception.InvalidInputException("Giá phải dương, tồn kho không âm");
++    }
+     private void checkArtisanOwnership(Caller caller, UUID artisanId) {
+-
+         if (caller.isAdmin()) return;
+-
+         UUID userId = caller.requireUserId();
+-
+         ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+-
+                 .orElseThrow(() -> new ForbiddenException("Bạn không có quyền thao tác trên sản phẩm này"));
+-
+         if (artisan.status() != ArtisanStatus.APPROVED) {
+-
+             throw new ForbiddenException("Hồ sơ xưởng gốm của bạn chưa được duyệt hoặc đã bị khóa");
+-
+         }
+-
+         if (!artisan.id().equals(artisanId)) {
+-
+             throw new ForbiddenException("Sản phẩm không thuộc xưởng của bạn");
+-
+         }
+-
+     }
+-
+ }
+-
+--- a/src/main/java/com/vcraft/domain/service/QuoteService.java
++++ b/src/main/java/com/vcraft/domain/service/QuoteService.java
+@@ -1,202 +1,105 @@
+ package com.vcraft.domain.service;
+-
+-
+-
+ import com.vcraft.domain.exception.ConflictException;
+-
+ import com.vcraft.domain.exception.ForbiddenException;
+-
+ import com.vcraft.domain.exception.InvalidInputException;
+-
+ import com.vcraft.domain.exception.NotFoundException;
+-
+ import com.vcraft.domain.model.ArtisanProfile;
+ import com.vcraft.domain.model.ArtisanStatus;
+-
+ import com.vcraft.domain.model.Bid;
+-
+ import com.vcraft.domain.model.BidStatus;
+-
+ import com.vcraft.domain.model.Caller;
+-
+ import com.vcraft.domain.model.QuoteRequest;
+-
+ import com.vcraft.domain.model.QuoteStatus;
+-
+ import com.vcraft.domain.repository.ArtisanRepository;
+-
+ import com.vcraft.domain.repository.BidRepository;
+-
+ import com.vcraft.domain.repository.QuoteRepository;
+-
+ import java.math.BigDecimal;
+-
+ import java.time.Instant;
+-
+ import java.util.List;
+-
+ import java.util.UUID;
+-
+-
+-
+ public class QuoteService {
+-
+-
+-
++    public record Allocation(UUID artisanId, int quantity) {}
+     public record QuoteWithBids(QuoteRequest quote, List<Bid> bids) {}
+-
+-
+-
+     private final QuoteRepository quoteRepository;
+-
+     private final BidRepository bidRepository;
+-
+     private final ArtisanRepository artisanRepository;
+-
+-
+-
++    private com.vcraft.domain.repository.ProductRepository products;
+     public QuoteService(QuoteRepository quoteRepository,
+-
+                         BidRepository bidRepository,
+-
+                         ArtisanRepository artisanRepository) {
+-
+         this.quoteRepository = quoteRepository;
+-
+         this.bidRepository = bidRepository;
+-
+         this.artisanRepository = artisanRepository;
+-
+-    }
+-
+-
+-
++    }
++    public QuoteService(QuoteRepository quotes, BidRepository bids, ArtisanRepository artisans,
++                        com.vcraft.domain.repository.ProductRepository products) {
++        this(quotes, bids, artisans);
++        this.products = products;
++    }
+     public List<QuoteRequest> getMyQuotes(Caller caller, String status, int page, int limit) {
+-
++        requireBuyer(caller);
+         UUID buyerId = caller.requireUserId();
+-
+         QuoteStatus quoteStatus = parseStatus(status);
+-
+         return quoteRepository.findByBuyerId(buyerId, quoteStatus, page, limit);
+-
+-    }
+-
+-
+-
++    }
+     public long countMyQuotes(Caller caller, String status) {
+-
++        requireBuyer(caller);
+         UUID buyerId = caller.requireUserId();
+-
+         QuoteStatus quoteStatus = parseStatus(status);
+-
+         return quoteRepository.countByBuyerId(buyerId, quoteStatus);
+-
+-    }
+-
+-
+-
++    }
+     public QuoteRequest createQuote(Caller caller, String title, String description, int quantity,
+-
+                                     String unit, Instant deadline, UUID categoryId, List<UUID> targetArtisanIds) {
+-
++        requireBuyer(caller);
+         UUID buyerId = caller.requireUserId();
+-
+-
+-
+         QuoteRequest quote = new QuoteRequest(
+-
+                 UUID.randomUUID(),
+-
+                 buyerId,
+-
+                 categoryId,
+-
+                 title,
+-
+                 description,
+-
+                 quantity > 0 ? quantity : 1,
+-
+                 unit != null ? unit : "cái",
+-
+                 deadline != null ? deadline : Instant.now().plusSeconds(86400 * 30),
+-
+                 QuoteStatus.DRAFT,
+-
+                 targetArtisanIds != null ? targetArtisanIds : List.of(),
+-
+                 null,
+-
+                 List.of(),
+-
+                 null,
+-
+                 0,
+-
+                 Instant.now(),
+-
+                 Instant.now()
+-
+-        );
+-
++        );
++        if (title == null || title.isBlank() || description == null || description.isBlank() || quantity <= 0
++                || (deadline != null && !deadline.isAfter(Instant.now())))
++            throw new InvalidInputException("Tiêu đề, mô tả, số lượng hoặc hạn giao không hợp lệ");
+         return quoteRepository.save(quote);
+-
+-    }
+-
+-
+-
++    }
+     public QuoteWithBids getQuoteDetail(Caller caller, UUID quoteId) {
+-
+         QuoteRequest quote = quoteRepository.findById(quoteId)
+-
+                 .orElseThrow(() -> new NotFoundException("Không tìm thấy yêu cầu báo giá"));
+-
+-
+-
+         if (!caller.isAdmin()) {
+-
+             UUID userId = caller.requireUserId();
+-
+             if (caller.isBuyer()) {
+-
+                 if (!quote.buyerId().equals(userId)) {
+-
+                     throw new ForbiddenException("Bạn không có quyền xem yêu cầu báo giá của người khác");
+-
+                 }
+-
+             } else if (caller.isArtisan()) {
+-
+-                if (quote.status() == QuoteStatus.DRAFT) {
+-
++                if (quote.status() == QuoteStatus.DRAFT || quote.status() == QuoteStatus.ALLOCATED) {
+                     throw new ForbiddenException("Yêu cầu báo giá đang ở trạng thái bản nháp của khách hàng");
+-
+                 }
+-
+                 ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+-
+                         .orElseThrow(() -> new ForbiddenException("Chưa có hồ sơ nghệ nhân"));
+-
++                if (!artisan.isApproved()) throw new ForbiddenException("Xưởng chưa được duyệt");
+                 if (quote.targetArtisanIds() != null && !quote.targetArtisanIds().isEmpty()
+-
+                         && !quote.targetArtisanIds().contains(artisan.id())) {
+-
+                     throw new ForbiddenException("Yêu cầu báo giá này không được gửi tới xưởng của bạn");
+-
+                 }
+-
+             } else {
+-
+                 throw new ForbiddenException("Bạn không có quyền xem yêu cầu báo giá này");
+-
+             }
+-
+-        }
+-
+-
+-
++        }
+         List<Bid> bids = bidRepository.findByQuoteRequestId(quoteId);
+-
+         // Bảo mật giá thầu: Nghệ nhân chỉ thấy giá thầu của xưởng mình
+         if (caller.isArtisan() && !caller.isAdmin()) {
+             UUID userId = caller.requireUserId();
+@@ -209,566 +112,352 @@
+                 bids = List.of();
+             }
+         }
+-
+         return new QuoteWithBids(quote, bids);
+-
+-    }
+-
+-
+-
++    }
+     public QuoteRequest updateDraftQuote(Caller caller, UUID quoteId, String title,
+-
+                                          String description, Integer quantity, Instant deadline) {
+-
+         QuoteRequest current = getQuote(quoteId);
+-
+         checkBuyerOwnership(caller, current.buyerId());
+-
+-
+-
+         if (current.status() != QuoteStatus.DRAFT) {
+-
+             throw new ConflictException("Chỉ có thể chỉnh sửa yêu cầu báo giá khi còn ở trạng thái Bản nháp (Draft)");
+-
+-        }
+-
+-
+-
++        }
++        if ((quantity != null && quantity <= 0) || (title != null && title.isBlank())
++                || (description != null && description.isBlank()) || (deadline != null && !deadline.isAfter(Instant.now())))
++            throw new InvalidInputException("Dữ liệu yêu cầu không hợp lệ");
+         QuoteRequest updated = new QuoteRequest(
+-
+                 current.id(),
+-
+                 current.buyerId(),
+-
+                 current.categoryId(),
+-
+                 title != null ? title : current.title(),
+-
+                 description != null ? description : current.description(),
+-
+                 quantity != null && quantity > 0 ? quantity : current.quantity(),
+-
+                 current.unit(),
+-
+                 deadline != null ? deadline : current.deadline(),
+-
+                 current.status(),
+-
+                 current.targetArtisanIds(),
+-
+                 current.deliveryNote(),
+-
+                 current.deliveryImages(),
+-
+                 current.acceptedBidId(),
+-
+                 current.version() + 1,
+-
+                 current.createdAt(),
+-
+                 Instant.now()
+-
+-        );
+-
++        );
+         return quoteRepository.save(updated);
+-
+-    }
+-
+-
+-
++    }
+     public QuoteRequest submitQuote(Caller caller, UUID quoteId) {
+-
+         QuoteRequest current = getQuote(quoteId);
+-
+         checkBuyerOwnership(caller, current.buyerId());
+-
+-
+-
+         if (!current.canBeSubmitted()) {
+-
+             throw new ConflictException("Yêu cầu báo giá đã được gửi hoặc không ở trạng thái Bản nháp");
+-
+-        }
+-
+-
+-
++        }
++        if (!current.deadline().isAfter(Instant.now())) throw new InvalidInputException("Hạn giao đã qua");
++        List<UUID> recipients = current.targetArtisanIds();
++        if (recipients == null || recipients.isEmpty()) {
++            var matched = new java.util.ArrayList<UUID>();
++            for (int page = 1; ; page++) {
++                var artisans = artisanRepository.findAllApproved(page, 100, null, null);
++                for (var artisan : artisans) {
++                    if (current.categoryId() == null || products == null
++                            || products.countProducts(artisan.id(), current.categoryId(), null, null) > 0)
++                        matched.add(artisan.id());
++                }
++                if (artisans.size() < 100) break;
++            }
++            recipients = matched;
++        }
++        if (recipients.isEmpty()) throw new InvalidInputException("Không tìm thấy xưởng phù hợp; chọn xưởng nhận yêu cầu");
++        for (var id : recipients) {
++            var recipient = artisanRepository.findById(id).orElseThrow(() -> new InvalidInputException("Xưởng nhận không tồn tại"));
++            if (!recipient.isApproved()) throw new InvalidInputException("Xưởng nhận chưa được duyệt");
++        }
+         QuoteRequest updated = new QuoteRequest(
+-
+                 current.id(),
+-
+                 current.buyerId(),
+-
+                 current.categoryId(),
+-
+                 current.title(),
+-
+                 current.description(),
+-
+                 current.quantity(),
+-
+                 current.unit(),
+-
+                 current.deadline(),
+-
+                 QuoteStatus.SENT,
+-
+-                current.targetArtisanIds(),
+-
++                recipients,
+                 current.deliveryNote(),
+-
+                 current.deliveryImages(),
+-
+                 current.acceptedBidId(),
+-
+                 current.version() + 1,
+-
+                 current.createdAt(),
+-
+                 Instant.now()
+-
+-        );
+-
++        );
+         return quoteRepository.save(updated);
+-
+-    }
+-
+-
+-
++    }
+     public void deleteDraftQuote(Caller caller, UUID quoteId) {
+-
+         QuoteRequest current = getQuote(quoteId);
+-
+         checkBuyerOwnership(caller, current.buyerId());
+-
+-
+-
+         if (current.status() != QuoteStatus.DRAFT) {
+-
+             throw new ConflictException("Chỉ có thể hủy yêu cầu khi còn ở trạng thái Bản nháp");
+-
+-        }
+-
++        }
+         quoteRepository.deleteById(quoteId);
+-
+-    }
+-
+-
+-
++    }
+     public List<QuoteRequest> getIncomingQuotesForArtisan(Caller caller, String status, int page, int limit) {
+-
+         UUID userId = caller.requireUserId();
+-
+         ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+-
+                 .orElseThrow(() -> new ForbiddenException("Chưa có hồ sơ nghệ nhân"));
+-
+-
+-
++        if (!artisan.isApproved()) throw new ForbiddenException("Xưởng chưa được duyệt");
+         QuoteStatus quoteStatus = parseStatus(status);
+-
+         return quoteRepository.findIncomingForArtisan(artisan.id(), quoteStatus, page, limit);
+-
+-    }
+-
+-
+-
++    }
+     public Bid placeBid(Caller caller, UUID quoteId, BigDecimal pricePerUnit, BigDecimal totalPrice,
+-
+                         int estimatedDays, String note, String deliveryTerms) {
+-
+-        QuoteRequest quote = getQuote(quoteId);
+-
++        QuoteRequest quote = getQuote(quoteId);
+         if (!quote.canReceiveBids()) {
+-
+             throw new ConflictException("Yêu cầu báo giá hiện không trong thời gian tiếp nhận chào giá");
+-
+-        }
+-
+-
+-
++        }
+         UUID userId = caller.requireUserId();
+-
+         ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+-
+                 .orElseThrow(() -> new ForbiddenException("Chỉ nghệ nhân mới được đặt giá thầu"));
+-
+-
+-
+         if (artisan.status() != ArtisanStatus.APPROVED) {
+-
+             throw new ForbiddenException("Hồ sơ xưởng gốm của bạn đang chờ duyệt hoặc đã bị khóa. Chỉ nghệ nhân được duyệt mới có thể tham gia chào giá.");
+-
+-        }
+-
+-
+-
++        }
+         bidRepository.findByQuoteRequestIdAndArtisanId(quoteId, artisan.id())
+-
+                 .ifPresent(existing -> {
+-
+                     throw new ConflictException("Bạn đã gửi chào giá cho yêu cầu này rồi. Vui lòng chỉnh sửa giá thầu hiện tại.");
+-
+                 });
+-
+-
+-
++        if (quote.targetArtisanIds() != null && !quote.targetArtisanIds().isEmpty()
++                && !quote.targetArtisanIds().contains(artisan.id())) {
++            throw new ForbiddenException("Yêu cầu không được gửi đến xưởng của bạn");
++        }
++        if (!quote.deadline().isAfter(Instant.now())) throw new ConflictException("Yêu cầu đã quá hạn giao");
++        validateBid(pricePerUnit, estimatedDays);
++        if (totalPrice != null && totalPrice.compareTo(pricePerUnit.multiply(BigDecimal.valueOf(quote.quantity()))) != 0) {
++            throw new InvalidInputException("Tổng giá phải bằng đơn giá nhân số lượng");
++        }
+         Bid bid = new Bid(
+-
+                 UUID.randomUUID(),
+-
+                 quoteId,
+-
+                 artisan.id(),
+-
+                 pricePerUnit,
+-
+                 totalPrice != null ? totalPrice : pricePerUnit.multiply(BigDecimal.valueOf(quote.quantity())),
+-
+                 estimatedDays,
+-
+                 note,
+-
+                 deliveryTerms,
+-
+                 BidStatus.PENDING,
+-
+                 Instant.now(),
+-
+                 Instant.now()
+-
+-        );
+-
++        );
+         Bid savedBid = bidRepository.save(bid);
+-
+-
+-
+         if (quote.status() == QuoteStatus.SENT) {
+-
+             QuoteRequest updatedQuote = new QuoteRequest(
+-
+                     quote.id(), quote.buyerId(), quote.categoryId(), quote.title(), quote.description(),
+-
+                     quote.quantity(), quote.unit(), quote.deadline(), QuoteStatus.BIDDING,
+-
+                     quote.targetArtisanIds(), quote.deliveryNote(), quote.deliveryImages(),
+-
+                     quote.acceptedBidId(), quote.version() + 1, quote.createdAt(), Instant.now()
+-
+             );
+-
+             quoteRepository.save(updatedQuote);
+-
+-        }
+-
+-
+-
++        }
+         return savedBid;
+-
+-    }
+-
+-
+-
++    }
+     public Bid updateBid(Caller caller, UUID quoteId, UUID bidId, BigDecimal pricePerUnit,
+-
+                          Integer estimatedDays, String note) {
+-
+         Bid current = bidRepository.findById(bidId)
+-
+                 .orElseThrow(() -> new NotFoundException("Không tìm thấy giá thầu"));
+-
+-
+-
+         checkArtisanOwnership(caller, current.artisanId());
+-
+-
+-
+         if (current.status() != BidStatus.PENDING) {
+-
+             throw new ConflictException("Không thể sửa giá thầu đã được chấp thuận hoặc từ chối");
+-
+-        }
+-
+-
+-
+-        QuoteRequest quote = getQuote(quoteId);
+-
++        }
++        QuoteRequest quote = getQuote(quoteId);
++        requirePendingBid(quote, current);
++        validateBid(pricePerUnit != null ? pricePerUnit : current.pricePerUnit(),
++                estimatedDays != null ? estimatedDays : current.estimatedDays());
+         BigDecimal newTotal = pricePerUnit != null ? pricePerUnit.multiply(BigDecimal.valueOf(quote.quantity())) : current.totalPrice();
+-
+-
+-
+         Bid updated = new Bid(
+-
+                 current.id(),
+-
+                 current.quoteRequestId(),
+-
+                 current.artisanId(),
+-
+                 pricePerUnit != null ? pricePerUnit : current.pricePerUnit(),
+-
+                 newTotal,
+-
+                 estimatedDays != null ? estimatedDays : current.estimatedDays(),
+-
+                 note != null ? note : current.note(),
+-
+                 current.deliveryTerms(),
+-
+                 current.status(),
+-
+                 current.createdAt(),
+-
+                 Instant.now()
+-
+-        );
+-
++        );
+         return bidRepository.save(updated);
+-
+-    }
+-
+-
+-
++    }
+     public void acceptBid(Caller caller, UUID quoteId, UUID bidId) {
+-
+-        QuoteRequest quote = getQuote(quoteId);
+-
++        QuoteRequest quote = getQuote(quoteId);
+         checkBuyerOwnership(caller, quote.buyerId());
+-
+-
+-
+         if (quote.status() != QuoteStatus.SENT && quote.status() != QuoteStatus.BIDDING) {
+-
+             throw new ConflictException("Yêu cầu báo giá đã chốt hoặc không ở trạng thái nhận thầu");
+-
+-        }
+-
+-
+-
++        }
+         Bid bid = bidRepository.findById(bidId)
+-
+                 .orElseThrow(() -> new NotFoundException("Không tìm thấy giá thầu được chọn"));
+-
+-
+-
+         if (!bid.quoteRequestId().equals(quoteId)) {
+-
+             throw new InvalidInputException("Giá thầu không thuộc về yêu cầu báo giá này");
+-
+-        }
+-
+-
+-
++        }
++        requirePendingBid(quote, bid);
+         // Chấp thuận bid này
+-
+         Bid accepted = new Bid(
+-
+                 bid.id(), bid.quoteRequestId(), bid.artisanId(), bid.pricePerUnit(),
+-
+                 bid.totalPrice(), bid.estimatedDays(), bid.note(), bid.deliveryTerms(),
+-
+                 BidStatus.ACCEPTED, bid.createdAt(), Instant.now()
+-
+-        );
+-
++        );
+         bidRepository.save(accepted);
+-
+-
+-
+         // Từ chối tất cả các bid khác
+-
+         bidRepository.updateStatusForOtherBids(quoteId, bidId, BidStatus.REJECTED);
+-
+-
+-
+         // Chuyển QuoteRequest sang IN_PRODUCTION
+-
+         QuoteRequest updatedQuote = new QuoteRequest(
+-
+                 quote.id(), quote.buyerId(), quote.categoryId(), quote.title(), quote.description(),
+-
++                quote.quantity(), quote.unit(), quote.deadline(), QuoteStatus.ACCEPTED,
++                quote.targetArtisanIds(), quote.deliveryNote(), quote.deliveryImages(),
++                bidId, quote.version() + 1, quote.createdAt(), Instant.now()
++        );
++        quoteRepository.save(updatedQuote);
++    }
++    public void rejectBid(Caller caller, UUID quoteId, UUID bidId) {
++        QuoteRequest quote = getQuote(quoteId);
++        checkBuyerOwnership(caller, quote.buyerId());
++        Bid bid = bidRepository.findById(bidId)
++                .orElseThrow(() -> new NotFoundException("Không tìm thấy giá thầu"));
++        requirePendingBid(quote, bid);
++        Bid rejected = new Bid(
++                bid.id(), bid.quoteRequestId(), bid.artisanId(), bid.pricePerUnit(),
++                bid.totalPrice(), bid.estimatedDays(), bid.note(), bid.deliveryTerms(),
++                BidStatus.REJECTED, bid.createdAt(), Instant.now()
++        );
++        bidRepository.save(rejected);
++    }
++    public QuoteRequest markDelivered(Caller caller, UUID quoteId, String deliveryNote, List<String> deliveryImages) {
++        QuoteRequest quote = getQuote(quoteId);
++        if (quote.status() != QuoteStatus.IN_PRODUCTION) {
++            throw new ConflictException("Đơn hàng không ở trạng thái Đang sản xuất (InProduction)");
++        }
++        checkWinningArtisan(caller, quote);
++        QuoteRequest updated = new QuoteRequest(
++                quote.id(), quote.buyerId(), quote.categoryId(), quote.title(), quote.description(),
++                quote.quantity(), quote.unit(), quote.deadline(), QuoteStatus.DELIVERED,
++                quote.targetArtisanIds(), deliveryNote, deliveryImages != null ? deliveryImages : List.of(),
++                quote.acceptedBidId(), quote.version() + 1, quote.createdAt(), Instant.now()
++        );
++        return quoteRepository.save(updated);
++    }
++    public QuoteRequest confirmDelivery(Caller caller, UUID quoteId) {
++        QuoteRequest quote = getQuote(quoteId);
++        checkBuyerOwnership(caller, quote.buyerId());
++        if (quote.status() != QuoteStatus.DELIVERED) {
++            throw new ConflictException("Đơn hàng chưa được nghệ nhân đánh dấu giao hàng");
++        }
++        QuoteRequest updated = new QuoteRequest(
++                quote.id(), quote.buyerId(), quote.categoryId(), quote.title(), quote.description(),
++                quote.quantity(), quote.unit(), quote.deadline(), QuoteStatus.CLOSED,
++                quote.targetArtisanIds(), quote.deliveryNote(), quote.deliveryImages(),
++                quote.acceptedBidId(), quote.version() + 1, quote.createdAt(), Instant.now()
++        );
++        return quoteRepository.save(updated);
++    }
++    /** Split an unawarded request into independently bid, buyer-approved workshop lots. */
++    public List<QuoteRequest> allocate(Caller caller, UUID quoteId, List<Allocation> parts) {
++        caller.requireAdmin();
++        QuoteRequest parent = getQuote(quoteId);
++        if (parent.status() != QuoteStatus.DRAFT && parent.status() != QuoteStatus.SENT)
++            throw new ConflictException("Chỉ điều phối yêu cầu chưa có chào giá");
++        if (!bidRepository.findByQuoteRequestId(quoteId).isEmpty())
++            throw new ConflictException("Không chia yêu cầu đã có chào giá");
++        if (parts == null || parts.size() < 2 || parts.stream().anyMatch(p -> p == null || p.quantity() <= 0 || p.artisanId() == null)
++                || parts.stream().mapToLong(Allocation::quantity).sum() != parent.quantity()
++                || parts.stream().map(Allocation::artisanId).distinct().count() != parts.size())
++            throw new InvalidInputException("Cần ít nhất hai xưởng khác nhau; tổng số lượng phải bằng yêu cầu gốc");
++        if (!parent.deadline().isAfter(Instant.now())) throw new InvalidInputException("Hạn giao đã qua");
++        for (var part : parts) {
++            var artisan = artisanRepository.findById(part.artisanId())
++                    .orElseThrow(() -> new InvalidInputException("Không tìm thấy xưởng được phân bổ"));
++            if (!artisan.isApproved()) throw new InvalidInputException("Xưởng phải được duyệt");
++        }
++        var children = new java.util.ArrayList<QuoteRequest>();
++        for (var part : parts) {
++            var child = quoteRepository.save(new QuoteRequest(UUID.randomUUID(), parent.buyerId(), parent.categoryId(),
++                    parent.title(), parent.description(), part.quantity(), parent.unit(), parent.deadline(), QuoteStatus.SENT,
++                    List.of(part.artisanId()), null, List.of(), null, 0, Instant.now(), Instant.now()));
++            quoteRepository.linkAllocation(parent.id(), child.id());
++            children.add(child);
++        }
++        quoteRepository.save(new QuoteRequest(parent.id(), parent.buyerId(), parent.categoryId(), parent.title(),
++                parent.description(), parent.quantity(), parent.unit(), parent.deadline(), QuoteStatus.ALLOCATED,
++                parent.targetArtisanIds(), parent.deliveryNote(), parent.deliveryImages(), null,
++                parent.version() + 1, parent.createdAt(), Instant.now()));
++        return children;
++    }
++
++    public List<QuoteRequest> getAllocations(Caller caller, UUID quoteId) {
++        var parent = getQuote(quoteId);
++        checkBuyerOwnership(caller, parent.buyerId());
++        return quoteRepository.findAllocations(quoteId);
++    }
++
++    public QuoteRequest startProduction(Caller caller, UUID quoteId) {
++        QuoteRequest quote = getQuote(quoteId);
++        if (quote.status() != QuoteStatus.ACCEPTED) {
++            throw new ConflictException("Chỉ bắt đầu sản xuất sau khi buyer chấp nhận");
++        }
++        checkWinningArtisan(caller, quote);
++        return quoteRepository.save(new QuoteRequest(
++                quote.id(), quote.buyerId(), quote.categoryId(), quote.title(), quote.description(),
+                 quote.quantity(), quote.unit(), quote.deadline(), QuoteStatus.IN_PRODUCTION,
+-
+                 quote.targetArtisanIds(), quote.deliveryNote(), quote.deliveryImages(),
+-
+-                bidId, quote.version() + 1, quote.createdAt(), Instant.now()
+-
+-        );
+-
+-        quoteRepository.save(updatedQuote);
+-
+-    }
+-
+-
+-
+-    public void rejectBid(Caller caller, UUID quoteId, UUID bidId) {
+-
+-        QuoteRequest quote = getQuote(quoteId);
+-
+-        checkBuyerOwnership(caller, quote.buyerId());
+-
+-
+-
+-        Bid bid = bidRepository.findById(bidId)
+-
+-                .orElseThrow(() -> new NotFoundException("Không tìm thấy giá thầu"));
+-
+-
+-
+-        Bid rejected = new Bid(
+-
+-                bid.id(), bid.quoteRequestId(), bid.artisanId(), bid.pricePerUnit(),
+-
+-                bid.totalPrice(), bid.estimatedDays(), bid.note(), bid.deliveryTerms(),
+-
+-                BidStatus.REJECTED, bid.createdAt(), Instant.now()
+-
+-        );
+-
+-        bidRepository.save(rejected);
+-
+-    }
+-
+-
+-
+-    public QuoteRequest markDelivered(Caller caller, UUID quoteId, String deliveryNote, List<String> deliveryImages) {
+-
+-        QuoteRequest quote = getQuote(quoteId);
+-
+-        if (quote.status() != QuoteStatus.IN_PRODUCTION) {
+-
+-            throw new ConflictException("Đơn hàng không ở trạng thái Đang sản xuất (InProduction)");
+-
+-        }
+-
+-
+-
+-        // Kiểm tra xem nghệ nhân trúng thầu có phải là caller này không
+-
+-        if (quote.acceptedBidId() != null) {
+-
+-            Bid bid = bidRepository.findById(quote.acceptedBidId()).orElse(null);
+-
+-            if (bid != null) {
+-
+-                checkArtisanOwnership(caller, bid.artisanId());
+-
+-            }
+-
+-        }
+-
+-
+-
+-        QuoteRequest updated = new QuoteRequest(
+-
+-                quote.id(), quote.buyerId(), quote.categoryId(), quote.title(), quote.description(),
+-
+-                quote.quantity(), quote.unit(), quote.deadline(), QuoteStatus.DELIVERED,
+-
+-                quote.targetArtisanIds(), deliveryNote, deliveryImages != null ? deliveryImages : List.of(),
+-
+-                quote.acceptedBidId(), quote.version() + 1, quote.createdAt(), Instant.now()
+-
+-        );
+-
+-        return quoteRepository.save(updated);
+-
+-    }
+-
+-
+-
+-    public QuoteRequest confirmDelivery(Caller caller, UUID quoteId) {
+-
+-        QuoteRequest quote = getQuote(quoteId);
+-
+-        checkBuyerOwnership(caller, quote.buyerId());
+-
+-
+-
+-        if (quote.status() != QuoteStatus.DELIVERED) {
+-
+-            throw new ConflictException("Đơn hàng chưa được nghệ nhân đánh dấu giao hàng");
+-
+-        }
+-
+-
+-
+-        QuoteRequest updated = new QuoteRequest(
+-
+-                quote.id(), quote.buyerId(), quote.categoryId(), quote.title(), quote.description(),
+-
+-                quote.quantity(), quote.unit(), quote.deadline(), QuoteStatus.CLOSED,
+-
+-                quote.targetArtisanIds(), quote.deliveryNote(), quote.deliveryImages(),
+-
+-                quote.acceptedBidId(), quote.version() + 1, quote.createdAt(), Instant.now()
+-
+-        );
+-
+-        return quoteRepository.save(updated);
+-
+-    }
+-
+-
++                quote.acceptedBidId(), quote.version() + 1, quote.createdAt(), Instant.now()));
++    }
++
++    private void checkWinningArtisan(Caller caller, QuoteRequest quote) {
++        if (quote.acceptedBidId() == null) throw new ConflictException("Chưa có xưởng trúng thầu");
++        Bid bid = bidRepository.findById(quote.acceptedBidId())
++                .orElseThrow(() -> new ConflictException("Không tìm thấy giá thầu đã chấp nhận"));
++        if (!bid.quoteRequestId().equals(quote.id()) || bid.status() != BidStatus.ACCEPTED)
++            throw new ConflictException("Giá thầu được chấp nhận không hợp lệ");
++        checkArtisanOwnership(caller, bid.artisanId());
++    }
++
++    private void requirePendingBid(QuoteRequest quote, Bid bid) {
++        if (!bid.quoteRequestId().equals(quote.id()))
++            throw new InvalidInputException("Giá thầu không thuộc yêu cầu này");
++        if (!quote.canReceiveBids() || bid.status() != BidStatus.PENDING)
++            throw new ConflictException("Yêu cầu đã chốt hoặc giá thầu không còn chờ xử lý");
++    }
++
++    private void validateBid(BigDecimal price, int days) {
++        if (price == null || price.signum() <= 0 || days <= 0)
++            throw new InvalidInputException("Đơn giá và thời gian hoàn thành phải lớn hơn 0");
++    }
++
++    private void requireBuyer(Caller caller) {
++        caller.requireUserId();
++        if (!caller.isBuyer() && !caller.isAdmin()) throw new ForbiddenException("Chỉ khách hàng được tạo yêu cầu");
++    }
+ 
+     private QuoteRequest getQuote(UUID quoteId) {
+-
+         return quoteRepository.findById(quoteId)
+-
+                 .orElseThrow(() -> new NotFoundException("Không tìm thấy yêu cầu báo giá"));
+-
+-    }
+-
+-
+-
++    }
+     private void checkBuyerOwnership(Caller caller, UUID buyerId) {
+-
+         if (caller.isAdmin()) return;
+-
+         if (!caller.requireUserId().equals(buyerId)) {
+-
+             throw new ForbiddenException("Bạn không phải người tạo yêu cầu báo giá này");
+-
+-        }
+-
+-    }
+-
+-
+-
++        }
++    }
+     private void checkArtisanOwnership(Caller caller, UUID artisanId) {
+-
+         if (caller.isAdmin()) return;
+-
+         UUID userId = caller.requireUserId();
+-
+         ArtisanProfile artisan = artisanRepository.findByUserId(userId)
+-
+                 .orElseThrow(() -> new ForbiddenException("Không tìm thấy hồ sơ xưởng gốm"));
+-
+         if (!artisan.id().equals(artisanId)) {
+-
+             throw new ForbiddenException("Bạn không có quyền thao tác trên giá thầu của xưởng khác");
+-
+-        }
+-
+-    }
+-
+-
+-
++        }
++    }
+     private QuoteStatus parseStatus(String status) {
+-
+         if (status == null || status.isBlank()) return null;
+-
+         try {
+-
+             return QuoteStatus.valueOf(status.toUpperCase());
+-
+         } catch (Exception e) {
+-
+-            return null;
+-
+-        }
+-
+-    }
+-
++            throw new InvalidInputException("Trạng thái báo giá không hợp lệ");
++        }
++    }
+ }
+-
+--- a/src/main/java/com/vcraft/infrastructure/adapter/CartRepositoryAdapter.java
++++ b/src/main/java/com/vcraft/infrastructure/adapter/CartRepositoryAdapter.java
+@@ -73,7 +73,7 @@
+     }
+ 
+     private Cart toDomain(CartEntity entity) {
+-        List<CartItem> items = entity.getItems().stream()
++        List<CartItem> items = cartItemJpaRepository.findByCartId(entity.getId()).stream()
+                 .map(i -> new CartItem(i.getId(), entity.getId(), i.getProductId(), i.getQuantity(), i.getCreatedAt()))
+                 .toList();
+         return new Cart(entity.getId(), entity.getUserId(), items, entity.getCreatedAt());
+--- a/src/main/java/com/vcraft/infrastructure/adapter/QuoteRepositoryAdapter.java
++++ b/src/main/java/com/vcraft/infrastructure/adapter/QuoteRepositoryAdapter.java
+@@ -16,9 +16,11 @@
+ public class QuoteRepositoryAdapter implements QuoteRepository {
+ 
+     private final QuoteJpaRepository jpaRepository;
++    private final com.vcraft.infrastructure.repository.QuoteAllocationJpaRepository allocations;
+ 
+-    public QuoteRepositoryAdapter(QuoteJpaRepository jpaRepository) {
++    public QuoteRepositoryAdapter(QuoteJpaRepository jpaRepository, com.vcraft.infrastructure.repository.QuoteAllocationJpaRepository allocations) {
+         this.jpaRepository = jpaRepository;
++        this.allocations = allocations;
+     }
+ 
+     @Override
+@@ -30,6 +32,18 @@
+     public QuoteRequest save(QuoteRequest quote) {
+         QuoteRequestEntity entity = toEntity(quote);
+         return toDomain(jpaRepository.save(entity));
++    }
++
++    @Override
++    public void linkAllocation(UUID parentId, UUID childId) {
++        allocations.save(new com.vcraft.infrastructure.entity.QuoteAllocationEntity(parentId, childId));
++    }
++
++    @Override
++    public List<QuoteRequest> findAllocations(UUID parentId) {
++        return allocations.findByParentId(parentId).stream()
++                .map(link -> jpaRepository.findById(link.getChildId()).orElseThrow())
++                .map(this::toDomain).toList();
+     }
+ 
+     @Override
+@@ -56,7 +70,7 @@
+     public List<QuoteRequest> findIncomingForArtisan(UUID artisanId, QuoteStatus status, int page, int limit) {
+         var pageable = PageRequest.of(Math.max(0, page - 1), Math.max(1, limit), Sort.by(Sort.Direction.DESC, "createdAt"));
+         String statusStr = status != null ? status.name() : null;
+-        return jpaRepository.findIncomingForArtisans(statusStr, pageable).getContent().stream()
++        return jpaRepository.findIncomingForArtisans("[\"" + artisanId + "\"]", statusStr, PageRequest.of(Math.max(0, page - 1), Math.max(1, limit), Sort.by(Sort.Direction.DESC, "created_at"))).getContent().stream()
+                 .map(this::toDomain)
+                 .toList();
+     }
+@@ -64,7 +78,7 @@
+     @Override
+     public long countIncomingForArtisan(UUID artisanId, QuoteStatus status) {
+         String statusStr = status != null ? status.name() : null;
+-        return jpaRepository.countIncomingForArtisans(statusStr);
++        return jpaRepository.countIncomingForArtisans("[\"" + artisanId + "\"]", statusStr);
+     }
+ 
+     @Override
+--- a/src/main/java/com/vcraft/infrastructure/entity/ArtisanProfileEntity.java
++++ b/src/main/java/com/vcraft/infrastructure/entity/ArtisanProfileEntity.java
+@@ -42,10 +42,12 @@
+     @Column(name = "family_history")
+     private String familyHistory;
+ 
++    @org.hibernate.annotations.ColumnTransformer(write = "?::jsonb")
+     @Column(columnDefinition = "jsonb")
+     @Convert(converter = JsonListConverter.class)
+     private List<String> certificates;
+ 
++    @org.hibernate.annotations.ColumnTransformer(write = "?::jsonb")
+     @Column(columnDefinition = "jsonb")
+     @Convert(converter = JsonListConverter.class)
+     private List<String> images;
+--- a/src/main/java/com/vcraft/infrastructure/entity/JsonListConverter.java
++++ b/src/main/java/com/vcraft/infrastructure/entity/JsonListConverter.java
+@@ -17,7 +17,7 @@
+         try {
+             return MAPPER.writeValueAsString(attribute);
+         } catch (Exception e) {
+-            return "[]";
++            throw new IllegalArgumentException("Không thể mã hóa danh sách JSON", e);
+         }
+     }
+ 
+@@ -27,7 +27,7 @@
+         try {
+             return MAPPER.readValue(dbData, new TypeReference<List<String>>() {});
+         } catch (Exception e) {
+-            return List.of();
++            throw new IllegalArgumentException("Danh sách JSON trong dữ liệu không hợp lệ", e);
+         }
+     }
+ }
+--- a/src/main/java/com/vcraft/infrastructure/entity/JsonUuidListConverter.java
++++ b/src/main/java/com/vcraft/infrastructure/entity/JsonUuidListConverter.java
+@@ -18,7 +18,7 @@
+         try {
+             return MAPPER.writeValueAsString(attribute);
+         } catch (Exception e) {
+-            return "[]";
++            throw new IllegalArgumentException("Không thể mã hóa danh sách JSON", e);
+         }
+     }
+ 
+@@ -28,7 +28,7 @@
+         try {
+             return MAPPER.readValue(dbData, new TypeReference<List<UUID>>() {});
+         } catch (Exception e) {
+-            return List.of();
++            throw new IllegalArgumentException("Danh sách JSON trong dữ liệu không hợp lệ", e);
+         }
+     }
+ }
+--- a/src/main/java/com/vcraft/infrastructure/entity/NewsEntity.java
++++ b/src/main/java/com/vcraft/infrastructure/entity/NewsEntity.java
+@@ -28,6 +28,7 @@
+     @Column(nullable = false)
+     private String type;
+ 
++    @org.hibernate.annotations.ColumnTransformer(write = "?::jsonb")
+     @Column(columnDefinition = "jsonb")
+     @Convert(converter = JsonListConverter.class)
+     private List<String> images;
+--- a/src/main/java/com/vcraft/infrastructure/entity/ProductEntity.java
++++ b/src/main/java/com/vcraft/infrastructure/entity/ProductEntity.java
+@@ -37,6 +37,7 @@
+     @Column(nullable = false)
+     private int stock;
+ 
++    @org.hibernate.annotations.ColumnTransformer(write = "?::jsonb")
+     @Column(columnDefinition = "jsonb")
+     @Convert(converter = JsonListConverter.class)
+     private List<String> images;
+--- a/src/main/java/com/vcraft/infrastructure/entity/ProductionLogEntity.java
++++ b/src/main/java/com/vcraft/infrastructure/entity/ProductionLogEntity.java
+@@ -24,6 +24,7 @@
+ 
+     private String note;
+ 
++    @org.hibernate.annotations.ColumnTransformer(write = "?::jsonb")
+     @Column(columnDefinition = "jsonb")
+     @Convert(converter = JsonListConverter.class)
+     private List<String> images;
+--- a/src/main/java/com/vcraft/infrastructure/entity/QuoteAllocationEntity.java
++++ b/src/main/java/com/vcraft/infrastructure/entity/QuoteAllocationEntity.java
+@@ -0,0 +1,17 @@
++package com.vcraft.infrastructure.entity;
++
++import jakarta.persistence.Entity;
++import jakarta.persistence.Id;
++import jakarta.persistence.Table;
++import jakarta.persistence.Column;
++import java.util.UUID;
++
++@Entity
++@Table(name = "quote_allocations")
++public class QuoteAllocationEntity {
++    @Id @Column(name = "child_id") private UUID childId;
++    @Column(name = "parent_id", nullable = false) private UUID parentId;
++    protected QuoteAllocationEntity() {}
++    public QuoteAllocationEntity(UUID parentId, UUID childId) { this.parentId = parentId; this.childId = childId; }
++    public UUID getChildId() { return childId; }
++}
+--- a/src/main/java/com/vcraft/infrastructure/entity/QuoteRequestEntity.java
++++ b/src/main/java/com/vcraft/infrastructure/entity/QuoteRequestEntity.java
+@@ -40,6 +40,7 @@
+     @Column(nullable = false)
+     private String status;
+ 
++    @org.hibernate.annotations.ColumnTransformer(write = "?::jsonb")
+     @Column(columnDefinition = "jsonb")
+     @Convert(converter = JsonUuidListConverter.class)
+     private List<UUID> targetArtisanIds;
+@@ -47,6 +48,7 @@
+     @Column(name = "delivery_note")
+     private String deliveryNote;
+ 
++    @org.hibernate.annotations.ColumnTransformer(write = "?::jsonb")
+     @Column(columnDefinition = "jsonb")
+     @Convert(converter = JsonListConverter.class)
+     private List<String> deliveryImages;
+--- a/src/main/java/com/vcraft/infrastructure/entity/ReviewEntity.java
++++ b/src/main/java/com/vcraft/infrastructure/entity/ReviewEntity.java
+@@ -30,6 +30,7 @@
+ 
+     private String comment;
+ 
++    @org.hibernate.annotations.ColumnTransformer(write = "?::jsonb")
+     @Column(columnDefinition = "jsonb")
+     @Convert(converter = JsonListConverter.class)
+     private List<String> images;
+--- a/src/main/java/com/vcraft/infrastructure/repository/ArtisanJpaRepository.java
++++ b/src/main/java/com/vcraft/infrastructure/repository/ArtisanJpaRepository.java
+@@ -15,12 +15,12 @@
+ 
+     @Query("SELECT a FROM ArtisanProfileEntity a WHERE a.status = 'APPROVED' AND " +
+            "(:district IS NULL OR a.district = :district) AND " +
+-           "(:search IS NULL OR LOWER(a.workshopName) LIKE LOWER(CONCAT('%', :search, '%')) OR LOWER(a.ownerName) LIKE LOWER(CONCAT('%', :search, '%')))")
++           "(:search IS NULL OR LOWER(a.workshopName) LIKE LOWER(CONCAT('%', CAST(:search AS string), '%')) OR LOWER(a.ownerName) LIKE LOWER(CONCAT('%', CAST(:search AS string), '%')))")
+     Page<ArtisanProfileEntity> searchApproved(@Param("search") String search, @Param("district") String district, Pageable pageable);
+ 
+     Page<ArtisanProfileEntity> findByStatus(String status, Pageable pageable);
+     long countByStatus(String status);
+ 
+-    @Query("SELECT a FROM ArtisanProfileEntity a WHERE a.status = 'APPROVED' AND (:openOnly = false OR a.openStatus = true)")
++    @Query("SELECT a FROM ArtisanProfileEntity a WHERE a.status = 'APPROVED' AND a.latitude BETWEEN -90 AND 90 AND a.longitude BETWEEN -180 AND 180 AND (:openOnly = false OR a.openStatus = true)")
+     List<ArtisanProfileEntity> findForMap(@Param("openOnly") boolean openOnly);
+ }
+--- a/src/main/java/com/vcraft/infrastructure/repository/CartItemJpaRepository.java
++++ b/src/main/java/com/vcraft/infrastructure/repository/CartItemJpaRepository.java
+@@ -9,6 +9,7 @@
+ import org.springframework.data.repository.query.Param;
+ 
+ public interface CartItemJpaRepository extends JpaRepository<CartItemEntity, UUID> {
++    java.util.List<CartItemEntity> findByCartId(UUID cartId);
+     Optional<CartItemEntity> findByCartIdAndProductId(UUID cartId, UUID productId);
+ 
+     @Modifying
+--- a/src/main/java/com/vcraft/infrastructure/repository/CartJpaRepository.java
++++ b/src/main/java/com/vcraft/infrastructure/repository/CartJpaRepository.java
+@@ -6,5 +6,6 @@
+ import org.springframework.data.jpa.repository.JpaRepository;
+ 
+ public interface CartJpaRepository extends JpaRepository<CartEntity, UUID> {
++    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+     Optional<CartEntity> findByUserId(UUID userId);
+ }
+--- a/src/main/java/com/vcraft/infrastructure/repository/OrderJpaRepository.java
++++ b/src/main/java/com/vcraft/infrastructure/repository/OrderJpaRepository.java
+@@ -9,6 +9,9 @@
+ import org.springframework.data.repository.query.Param;
+ 
+ public interface OrderJpaRepository extends JpaRepository<OrderEntity, UUID> {
++    @Override
++    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
++    java.util.Optional<OrderEntity> findById(UUID id);
+     @Query("SELECT o FROM OrderEntity o WHERE o.buyerId = :buyerId AND (:status IS NULL OR o.status = :status)")
+     Page<OrderEntity> findByBuyerIdAndStatus(@Param("buyerId") UUID buyerId, @Param("status") String status, Pageable pageable);
+ 
+--- a/src/main/java/com/vcraft/infrastructure/repository/ProductJpaRepository.java
++++ b/src/main/java/com/vcraft/infrastructure/repository/ProductJpaRepository.java
+@@ -11,10 +11,13 @@
+ import org.springframework.data.repository.query.Param;
+ 
+ public interface ProductJpaRepository extends JpaRepository<ProductEntity, UUID> {
++    @Override
++    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
++    java.util.Optional<ProductEntity> findById(UUID id);
+     List<ProductEntity> findByArtisanId(UUID artisanId);
+     List<ProductEntity> findByBatchId(UUID batchId);
+ 
+-    @Query("SELECT p FROM ProductEntity p WHERE " +
++    @Query("SELECT p FROM ProductEntity p WHERE EXISTS (SELECT a.id FROM ArtisanProfileEntity a WHERE a.id = p.artisanId AND a.status = 'APPROVED') AND " +
+            "(:artisanId IS NULL OR p.artisanId = :artisanId) AND " +
+            "(:categoryId IS NULL OR p.categoryId = :categoryId) AND " +
+            "(:minPrice IS NULL OR p.price >= :minPrice) AND " +
+--- a/src/main/java/com/vcraft/infrastructure/repository/QuoteAllocationJpaRepository.java
++++ b/src/main/java/com/vcraft/infrastructure/repository/QuoteAllocationJpaRepository.java
+@@ -0,0 +1,8 @@
++package com.vcraft.infrastructure.repository;
++import com.vcraft.infrastructure.entity.QuoteAllocationEntity;
++import org.springframework.data.jpa.repository.JpaRepository;
++import java.util.List;
++import java.util.UUID;
++public interface QuoteAllocationJpaRepository extends JpaRepository<QuoteAllocationEntity, UUID> {
++    List<QuoteAllocationEntity> findByParentId(UUID parentId);
++}
+--- a/src/main/java/com/vcraft/infrastructure/repository/QuoteJpaRepository.java
++++ b/src/main/java/com/vcraft/infrastructure/repository/QuoteJpaRepository.java
+@@ -9,17 +9,20 @@
+ import org.springframework.data.repository.query.Param;
+ 
+ public interface QuoteJpaRepository extends JpaRepository<QuoteRequestEntity, UUID> {
++    @Override
++    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
++    java.util.Optional<QuoteRequestEntity> findById(UUID id);
+     @Query("SELECT q FROM QuoteRequestEntity q WHERE q.buyerId = :buyerId AND (:status IS NULL OR q.status = :status)")
+     Page<QuoteRequestEntity> findByBuyerIdAndStatus(@Param("buyerId") UUID buyerId, @Param("status") String status, Pageable pageable);
+ 
+     @Query("SELECT COUNT(q) FROM QuoteRequestEntity q WHERE q.buyerId = :buyerId AND (:status IS NULL OR q.status = :status)")
+     long countByBuyerIdAndStatus(@Param("buyerId") UUID buyerId, @Param("status") String status);
+ 
+-    @Query("SELECT q FROM QuoteRequestEntity q WHERE (q.status = 'SENT' OR q.status = 'BIDDING') AND (:status IS NULL OR q.status = :status)")
+-    Page<QuoteRequestEntity> findIncomingForArtisans(@Param("status") String status, Pageable pageable);
++    @Query(value = "SELECT * FROM quote_requests q WHERE q.status NOT IN ('DRAFT', 'ALLOCATED') AND (:status IS NULL OR q.status = :status) AND (jsonb_array_length(q.target_artisan_ids) = 0 OR q.target_artisan_ids @> CAST(:target AS jsonb))", nativeQuery = true)
++    Page<QuoteRequestEntity> findIncomingForArtisans(@Param("target") String target, @Param("status") String status, Pageable pageable);
+ 
+-    @Query("SELECT COUNT(q) FROM QuoteRequestEntity q WHERE (q.status = 'SENT' OR q.status = 'BIDDING') AND (:status IS NULL OR q.status = :status)")
+-    long countIncomingForArtisans(@Param("status") String status);
++    @Query(value = "SELECT COUNT(*) FROM quote_requests q WHERE q.status NOT IN ('DRAFT', 'ALLOCATED') AND (:status IS NULL OR q.status = :status) AND (jsonb_array_length(q.target_artisan_ids) = 0 OR q.target_artisan_ids @> CAST(:target AS jsonb))", nativeQuery = true)
++    long countIncomingForArtisans(@Param("target") String target, @Param("status") String status);
+ 
+     @Query("SELECT q FROM QuoteRequestEntity q WHERE (:status IS NULL OR q.status = :status)")
+     Page<QuoteRequestEntity> findAllByStatus(@Param("status") String status, Pageable pageable);
+--- a/src/main/java/com/vcraft/infrastructure/repository/RefreshTokenJpaRepository.java
++++ b/src/main/java/com/vcraft/infrastructure/repository/RefreshTokenJpaRepository.java
+@@ -6,6 +6,7 @@
+ import org.springframework.data.jpa.repository.JpaRepository;
+ 
+ public interface RefreshTokenJpaRepository extends JpaRepository<RefreshTokenEntity, UUID> {
++    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+     Optional<RefreshTokenEntity> findByToken(String token);
+     void deleteByToken(String token);
+     void deleteByUserId(UUID userId);
+--- a/src/main/java/com/vcraft/infrastructure/repository/UserJpaRepository.java
++++ b/src/main/java/com/vcraft/infrastructure/repository/UserJpaRepository.java
+@@ -15,6 +15,6 @@
+ 
+     @Query("SELECT u FROM UserEntity u WHERE " +
+            "(:role IS NULL OR u.role = :role) AND " +
+-           "(:search IS NULL OR LOWER(u.fullName) LIKE LOWER(CONCAT('%', :search, '%')) OR LOWER(u.email) LIKE LOWER(CONCAT('%', :search, '%')))")
++           "(:search IS NULL OR LOWER(u.fullName) LIKE LOWER(CONCAT('%', CAST(:search AS string), '%')) OR LOWER(u.email) LIKE LOWER(CONCAT('%', CAST(:search AS string), '%')))")
+     Page<UserEntity> searchUsers(@Param("role") String role, @Param("search") String search, Pageable pageable);
+ }
+--- a/src/main/java/com/vcraft/infrastructure/security/JwtAuthenticationFilter.java
++++ b/src/main/java/com/vcraft/infrastructure/security/JwtAuthenticationFilter.java
+@@ -18,9 +18,15 @@
+ public class JwtAuthenticationFilter extends OncePerRequestFilter {
+ 
+     private final JwtTokenProvider tokenProvider;
++    private com.vcraft.domain.repository.UserRepository users;
+ 
+     public JwtAuthenticationFilter(JwtTokenProvider tokenProvider) {
+         this.tokenProvider = tokenProvider;
++    }
++
++    public JwtAuthenticationFilter(JwtTokenProvider provider, com.vcraft.domain.repository.UserRepository users) {
++        this(provider);
++        this.users = users;
+     }
+ 
+     @Override
+@@ -33,6 +39,7 @@
+             tokenProvider.parseClaims(token).ifPresent(claims -> {
+                 try {
+                     UUID userId = UUID.fromString(claims.getSubject());
++                    if (users != null && users.findById(userId).filter(com.vcraft.domain.model.User::isActive).isEmpty()) return;
+                     String email = claims.get("email", String.class);
+                     String roleStr = claims.get("role", String.class);
+                     Role role = Role.fromString(roleStr);
+--- a/src/main/java/com/vcraft/infrastructure/security/JwtTokenProvider.java
++++ b/src/main/java/com/vcraft/infrastructure/security/JwtTokenProvider.java
+@@ -24,7 +24,9 @@
+     private final Duration refreshTokenTtl;
+ 
+     public JwtTokenProvider(JwtProperties properties) {
+-        this.key = Keys.hmacShaKeyFor(properties.secret().getBytes(StandardCharsets.UTF_8));
++        this.key = properties.secret() == null || properties.secret().isBlank()
++                ? Jwts.SIG.HS256.key().build()
++                : Keys.hmacShaKeyFor(properties.secret().getBytes(StandardCharsets.UTF_8));
+         this.accessTokenTtl = Duration.ofMinutes(properties.accessTokenMinutes() > 0 ? properties.accessTokenMinutes() : 60);
+         this.refreshTokenTtl = Duration.ofDays(properties.refreshTokenDays() > 0 ? properties.refreshTokenDays() : 7);
+     }
+--- a/src/main/java/com/vcraft/infrastructure/storage/LocalImageStorageService.java
++++ b/src/main/java/com/vcraft/infrastructure/storage/LocalImageStorageService.java
+@@ -1,64 +1,66 @@
+ package com.vcraft.infrastructure.storage;
+ 
++import com.vcraft.domain.exception.InvalidInputException;
+ import com.vcraft.domain.service.ImageStorageService;
+ import java.io.InputStream;
++import java.io.IOException;
+ import java.nio.file.Files;
+ import java.nio.file.Path;
+-import java.nio.file.Paths;
+ import java.util.UUID;
++import javax.imageio.ImageIO;
+ import net.coobird.thumbnailator.Thumbnails;
+ import org.springframework.beans.factory.annotation.Value;
+ import org.springframework.stereotype.Component;
+ 
+ @Component
+ public class LocalImageStorageService implements ImageStorageService {
+-
+-    private final String uploadDir;
++    private final Path root;
+     private final String baseUrl;
+ 
+     public LocalImageStorageService(@Value("${app.upload-dir:./uploads}") String uploadDir,
+-                                    @Value("${app.base-url:http://localhost:8080}") String baseUrl) {
+-        this.uploadDir = uploadDir;
+-        this.baseUrl = baseUrl;
++                                   @Value("${app.base-url:http://localhost:8080}") String baseUrl) {
++        this.root = Path.of(uploadDir).toAbsolutePath().normalize();
++        this.baseUrl = baseUrl.replaceAll("/+$", "");
+     }
+ 
+     @Override
+-    public String storeImage(InputStream inputStream, String originalFilename, String category) {
+-        try {
+-            String subDir = category != null ? category : "general";
+-            Path targetDir = Paths.get(uploadDir, subDir);
+-            if (!Files.exists(targetDir)) {
+-                Files.createDirectories(targetDir);
++    public String storeImage(InputStream stream, String filename, String category) {
++        String subdir = category == null ? "general" : category;
++        if (!subdir.matches("[a-zA-Z0-9_-]+")) throw new InvalidInputException("Thư mục ảnh không hợp lệ");
++        try (var imageStream = ImageIO.createImageInputStream(stream)) {
++            var readers = ImageIO.getImageReaders(imageStream);
++            if (!readers.hasNext()) throw new InvalidInputException("File không phải ảnh được hỗ trợ");
++            var reader = readers.next();
++            try {
++                reader.setInput(imageStream);
++                int width = reader.getWidth(0), height = reader.getHeight(0);
++                if (width <= 0 || height <= 0 || (long) width * height > 40_000_000)
++                    throw new InvalidInputException("Ảnh vượt quá giới hạn 40 megapixel");
++                var image = reader.read(0);
++                Path dir = root.resolve(subdir);
++                Files.createDirectories(dir);
++                String name = UUID.randomUUID() + ".jpg";
++                Thumbnails.of(image).size(1200, 1200).outputFormat("jpg").outputQuality(0.85)
++                        .toFile(dir.resolve(name).toFile());
++                return baseUrl + "/uploads/" + subdir + "/" + name;
++            } finally {
++                reader.dispose();
+             }
+-
+-            String ext = ".jpg";
+-            if (originalFilename != null && originalFilename.contains(".")) {
+-                ext = originalFilename.substring(originalFilename.lastIndexOf(".")).toLowerCase();
+-            }
+-
+-            String uniqueName = UUID.randomUUID().toString() + ext;
+-            Path targetFile = targetDir.resolve(uniqueName);
+-
+-            // Nén và tối ưu hóa kích cỡ ảnh (Max 1200x1200px)
+-            Thumbnails.of(inputStream)
+-                    .size(1200, 1200)
+-                    .outputQuality(0.85)
+-                    .toFile(targetFile.toFile());
+-
+-            return baseUrl + "/uploads/" + subDir + "/" + uniqueName;
+-        } catch (Exception e) {
+-            throw new RuntimeException("Lỗi lưu trữ hình ảnh: " + e.getMessage(), e);
++        } catch (IOException ex) {
++            throw new InvalidInputException("Không thể đọc hoặc lưu ảnh");
+         }
+     }
+ 
+     @Override
+-    public void deleteImage(String fileUrl) {
++    public void deleteImage(String url) {
++        String prefix = baseUrl + "/uploads/";
++        if (url == null || !url.startsWith(prefix)) return;
++        Path target = root.resolve(url.substring(prefix.length())).normalize();
++        if (!target.startsWith(root)) throw new InvalidInputException("Đường dẫn ảnh không hợp lệ");
+         try {
+-            if (fileUrl != null && fileUrl.contains("/uploads/")) {
+-                String relativePath = fileUrl.substring(fileUrl.indexOf("/uploads/") + 9);
+-                Path path = Paths.get(uploadDir, relativePath);
+-                Files.deleteIfExists(path);
+-            }
+-        } catch (Exception ignored) {}
++            Files.deleteIfExists(target);
++        } catch (IOException ex) {
++            throw new IllegalStateException("Không thể xóa ảnh", ex);
++        }
+     }
+ }
+--- a/src/main/resources/application.yml
++++ b/src/main/resources/application.yml
+@@ -6,6 +6,10 @@
+     username: ${SPRING_DATASOURCE_USERNAME:postgres}
+     password: ${SPRING_DATASOURCE_PASSWORD:postgres}
+     driver-class-name: org.postgresql.Driver
++  servlet:
++    multipart:
++      max-file-size: 10MB
++      max-request-size: 50MB
+   jpa:
+     open-in-view: false
+     hibernate:
+@@ -30,11 +34,12 @@
+     operations-sorter: method
+ 
+ jwt:
+-  secret: ${JWT_SECRET:vcraft-bat-trang-secret-key-32chars-minimum-token}
++  secret: ${JWT_SECRET:}
+   access-token-minutes: ${JWT_ACCESS_TOKEN_MINUTES:60}
+   refresh-token-days: ${JWT_REFRESH_TOKEN_DAYS:7}
+ 
+ app:
++  cors-allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:8080}
+   upload-dir: ${FILE_UPLOAD_DIR:./uploads}
+   base-url: ${APP_BASE_URL:http://localhost:8080}
+-  frontend-url: ${FRONTEND_URL:http://localhost:3000}
++  frontend-url: ${FRONTEND_URL:http://localhost:8080}
+--- a/src/main/resources/db/migration/V3__bid_uniqueness.sql
++++ b/src/main/resources/db/migration/V3__bid_uniqueness.sql
+@@ -0,0 +1,2 @@
++-- One bid per workshop per quotation, also enforced under concurrent requests.
++CREATE UNIQUE INDEX uq_bid_quote_artisan ON bids (quote_request_id, artisan_id);
+--- a/src/main/resources/db/migration/V4__quote_allocations.sql
++++ b/src/main/resources/db/migration/V4__quote_allocations.sql
+@@ -0,0 +1,6 @@
++CREATE TABLE quote_allocations (
++    child_id UUID PRIMARY KEY REFERENCES quote_requests(id),
++    parent_id UUID NOT NULL REFERENCES quote_requests(id),
++    CHECK (child_id <> parent_id)
++);
++CREATE INDEX idx_quote_allocations_parent ON quote_allocations(parent_id);
+--- a/src/main/resources/db/migration/V5__cart_item_uniqueness.sql
++++ b/src/main/resources/db/migration/V5__cart_item_uniqueness.sql
+@@ -0,0 +1 @@
++CREATE UNIQUE INDEX uq_cart_item_product ON cart_items(cart_id, product_id);
+--- a/src/main/resources/static/trace.html
++++ b/src/main/resources/static/trace.html
+@@ -0,0 +1 @@
++<!doctype html><html lang="vi"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>vCraft · Câu chuyện lô gốm</title><link rel="stylesheet" href="/vcraft.css"><header><span>vCraft · Truy xuất nguồn gốc</span></header><main><p class="eyebrow">BÁT TRÀNG · TRUY XUẤT NGUỒN GỐC</p><h1>Mỗi món gốm,<br>một câu chuyện.</h1><div id="story" aria-live="polite">Đang tải câu chuyện…</div></main><script src="/trace.js" defer></script></html>
+--- a/src/main/resources/static/trace.js
++++ b/src/main/resources/static/trace.js
+@@ -0,0 +1,4 @@
++const box=document.querySelector('#story');
++function el(tag,text,parent){const n=document.createElement(tag);if(text!=null)n.textContent=text;if(parent)parent.append(n);return n}
++function photos(urls,parent){const row=el('div',null,parent);row.className='photos';for(const url of urls||[]){try{const u=new URL(url,location.origin);if(!['http:','https:'].includes(u.protocol))continue;const img=el('img',null,row);img.src=u.href;img.alt='Hình ảnh minh chứng sản xuất';img.loading='lazy'}catch{}}}
++(async()=>{try{const id=location.pathname.startsWith('/trace/')?location.pathname.split('/')[2]:new URLSearchParams(location.search).get('batch');if(!id)throw Error('Thiếu mã lô sản xuất. Hãy quét mã QR trên sản phẩm.');const r=await fetch('/api/v1/trace/'+encodeURIComponent(id));if(!r.ok)throw Error('Không tìm thấy lô sản xuất.');const s=await r.json();box.replaceChildren();const hero=el('article',null,box);el('h2',s.batch.name,hero);el('p',s.batch.description,hero);el('p','Xưởng: '+s.artisan.workshopName,hero);el('p',s.artisan.familyHistory||s.artisan.description,hero);photos(s.artisan.images,hero);if(s.artisan.certificates?.length){el('h3','Chứng nhận chất lượng',hero);for(const c of s.artisan.certificates)el('p',c,hero)}const timeline=el('div',null,box);timeline.className='timeline';for(const log of s.logs){const a=el('article',null,timeline);el('time',new Date(log.loggedAt).toLocaleString('vi-VN'),a);el('h2',log.stage,a);el('p',log.note,a);photos(log.images,a)}if(!s.logs.length)el('p','Xưởng chưa cập nhật nhật ký cho lô này.',timeline);el('h2','Sản phẩm cùng lô',box);for(const p of s.products){const a=el('article',null,box);el('h3',p.name,a);el('p',p.description,a);photos(p.images,a)}}catch(e){box.textContent=e.message;box.className='error'}})();
+--- a/src/main/resources/static/vcraft.css
++++ b/src/main/resources/static/vcraft.css
+@@ -0,0 +1,2 @@
++:root{font-family:'Be Vietnam Pro',sans-serif;color:#302b25;background:#f6f2ea;line-height:1.7}*{box-sizing:border-box}body{margin:0}header{display:flex;justify-content:space-between;align-items:center;padding:22px 6vw;border-bottom:1px solid #d9d1c5}header>a:first-child{font:600 30px 'Playfair Display',serif;color:#8d482d}a{color:#8d482d}main{max-width:1100px;margin:70px auto;padding:0 24px}h1{font:500 clamp(40px,7vw,78px)/1.1 'Playfair Display',serif;letter-spacing:-2px}h2{font:500 30px 'Playfair Display',serif}h3{margin-top:0}.eyebrow{font-size:12px;letter-spacing:3px;color:#8d482d}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:24px}.card,article{border:1px solid #d9d1c5;padding:24px;background:#fffcf7;border-radius:8px;margin:20px 0}.photos{display:flex;gap:14px;overflow:auto}.photos img{max-height:300px;max-width:100%;border-radius:5px;object-fit:cover}p{white-space:pre-wrap}button,input,select,textarea{font:inherit;padding:10px;border:1px solid #c8b8a5;border-radius:4px}button{background:#8d482d;color:white;cursor:pointer}label{display:block;margin:12px 0}#map{height:550px;border-radius:8px}time{font-size:13px;color:#806d5d}.timeline{border-left:2px solid #b7774f;padding-left:28px;margin-top:32px}.error{color:#a22}img.qr{width:180px}nav{display:flex;gap:24px;flex-wrap:wrap}
++@media(max-width:600px){header{flex-wrap:wrap;gap:14px}nav{gap:12px;font-size:13px}main{margin:42px auto;padding:0 18px}h1{letter-spacing:-1px}.grid{grid-template-columns:minmax(0,1fr)}select{max-width:100%}#map{height:420px}.card,article{padding:18px}input,textarea{max-width:100%}}--- a/src/test/java/com/vcraft/api/ImageUploadSupportTest.java
++++ b/src/test/java/com/vcraft/api/ImageUploadSupportTest.java
+@@ -0,0 +1,19 @@
++package com.vcraft.api;
++import static org.assertj.core.api.Assertions.assertThatThrownBy;
++import static org.mockito.Mockito.*;
++import com.vcraft.domain.exception.InvalidInputException;
++import com.vcraft.domain.service.ImageStorageService;
++import java.util.List;
++import org.junit.jupiter.api.Test;
++import org.springframework.mock.web.MockMultipartFile;
++class ImageUploadSupportTest {
++    @Test void removesEarlierFilesWhenLaterImageFails() {
++        var storage = mock(ImageStorageService.class);
++        when(storage.storeImage(any(), any(), any())).thenReturn("http://localhost/uploads/one.jpg")
++                .thenThrow(new InvalidInputException("bad image"));
++        var file = new MockMultipartFile("files", "a.png", "image/png", new byte[]{1});
++        assertThatThrownBy(() -> ImageUploadSupport.storeAll(storage, List.of(file, file), "products"))
++                .isInstanceOf(InvalidInputException.class);
++        verify(storage).deleteImage("http://localhost/uploads/one.jpg");
++    }
++}
+--- a/src/test/java/com/vcraft/api/auth/AuthControllerTest.java
++++ b/src/test/java/com/vcraft/api/auth/AuthControllerTest.java
+@@ -57,6 +57,9 @@
+ 
+     @MockitoBean
+     private AuthService authService;
++
++    @MockitoBean
++    private com.vcraft.domain.repository.UserRepository users;
+ 
+     @MockitoBean
+     private JwtTokenProvider jwtTokenProvider;
+--- a/src/test/java/com/vcraft/domain/service/BatchServiceTest.java
++++ b/src/test/java/com/vcraft/domain/service/BatchServiceTest.java
+@@ -314,5 +314,21 @@
+ 
+     }
+ 
++
++    @Test
++    void cannotMutateLogFromAnotherBatch() {
++        var logId = UUID.randomUUID();
++        var log = new com.vcraft.domain.model.ProductionLog(logId, UUID.randomUUID(), "Nung", null,
++                List.of(), Instant.now(), Instant.now());
++        when(batchRepository.findById(BATCH_ID)).thenReturn(Optional.of(batch));
++        when(logRepository.findById(logId)).thenReturn(Optional.of(log));
++        when(artisanRepository.findByUserId(ARTISAN_USER_ID)).thenReturn(Optional.of(artisanProfile));
++        var caller = Caller.authenticated(ARTISAN_USER_ID, "a@v.vn", Role.ARTISAN);
++        assertThatThrownBy(() -> batchService.updateLog(caller, BATCH_ID, logId, "x", null)).isInstanceOf(ForbiddenException.class);
++        assertThatThrownBy(() -> batchService.deleteLog(caller, BATCH_ID, logId)).isInstanceOf(ForbiddenException.class);
++        assertThatThrownBy(() -> batchService.addLogImages(caller, BATCH_ID, logId, List.of("x"))).isInstanceOf(ForbiddenException.class);
++        verify(logRepository, never()).save(any());
++        verify(logRepository, never()).deleteById(any());
++    }
+ }
+ 
+--- a/src/test/java/com/vcraft/domain/service/QuoteServiceTest.java
++++ b/src/test/java/com/vcraft/domain/service/QuoteServiceTest.java
+@@ -544,5 +544,54 @@
+ 
+     }
+ 
++
++    @Test
++    void rejectsChangingBidThroughAnotherQuote() {
++        var other = new Bid(BID_ID, UUID.randomUUID(), ARTISAN_ID, BigDecimal.ONE,
++                BigDecimal.TEN, 2, null, null, BidStatus.PENDING, Instant.now(), Instant.now());
++        when(quoteRepository.findById(QUOTE_ID)).thenReturn(Optional.of(biddingQuote));
++        when(bidRepository.findById(BID_ID)).thenReturn(Optional.of(other));
++        when(artisanRepository.findByUserId(ARTISAN_USER_ID)).thenReturn(Optional.of(artisanProfile));
++        var artisan = Caller.authenticated(ARTISAN_USER_ID, "a@v.vn", Role.ARTISAN);
++        var buyer = Caller.authenticated(BUYER_ID, "b@v.vn", Role.BUYER);
++        assertThatThrownBy(() -> quoteService.updateBid(artisan, QUOTE_ID, BID_ID, BigDecimal.TEN, 3, null))
++                .isInstanceOf(com.vcraft.domain.exception.InvalidInputException.class);
++        assertThatThrownBy(() -> quoteService.rejectBid(buyer, QUOTE_ID, BID_ID))
++                .isInstanceOf(com.vcraft.domain.exception.InvalidInputException.class);
++        verify(bidRepository, never()).save(any());
++    }
++
++    @Test
++    void acceptanceWaitsForExplicitProductionStart() {
++        when(quoteRepository.findById(QUOTE_ID)).thenReturn(Optional.of(biddingQuote));
++        when(bidRepository.findById(BID_ID)).thenReturn(Optional.of(pendingBid));
++        quoteService.acceptBid(Caller.authenticated(BUYER_ID, "b@v.vn", Role.BUYER), QUOTE_ID, BID_ID);
++        var captured = org.mockito.ArgumentCaptor.forClass(QuoteRequest.class);
++        verify(quoteRepository).save(captured.capture());
++        assertThat(captured.getValue().status()).isEqualTo(QuoteStatus.ACCEPTED);
++    }
++
++    @Test
++    void cannotAcceptPreviouslyRejectedBid() {
++        var rejected = new Bid(BID_ID, QUOTE_ID, ARTISAN_ID, BigDecimal.ONE,
++                BigDecimal.TEN, 2, null, null, BidStatus.REJECTED, Instant.now(), Instant.now());
++        when(quoteRepository.findById(QUOTE_ID)).thenReturn(Optional.of(biddingQuote));
++        when(bidRepository.findById(BID_ID)).thenReturn(Optional.of(rejected));
++        assertThatThrownBy(() -> quoteService.acceptBid(Caller.authenticated(BUYER_ID, "b@v.vn", Role.BUYER), QUOTE_ID, BID_ID))
++                .isInstanceOf(ConflictException.class);
++        verify(bidRepository, never()).save(any());
++    }
++
++    @Test void allocationRequiresAdminAndExactQuantity() {
++        var buyer = Caller.authenticated(BUYER_ID, "b@v.vn", Role.BUYER);
++        assertThatThrownBy(() -> quoteService.allocate(buyer, QUOTE_ID, List.of()))
++                .isInstanceOf(ForbiddenException.class);
++        when(quoteRepository.findById(QUOTE_ID)).thenReturn(Optional.of(draftQuote));
++        var admin = Caller.authenticated(OTHER_USER_ID, "admin@v.vn", Role.ADMIN);
++        assertThatThrownBy(() -> quoteService.allocate(admin, QUOTE_ID, List.of(
++                new QuoteService.Allocation(ARTISAN_ID, 10), new QuoteService.Allocation(UUID.randomUUID(), 20))))
++                .isInstanceOf(com.vcraft.domain.exception.InvalidInputException.class);
++        verify(quoteRepository, never()).save(any());
++    }
+ }
+ 
+--- a/src/test/java/com/vcraft/infrastructure/qr/ZxingQrCodeGeneratorTest.java
++++ b/src/test/java/com/vcraft/infrastructure/qr/ZxingQrCodeGeneratorTest.java
+@@ -0,0 +1,23 @@
++package com.vcraft.infrastructure.qr;
++
++import static org.assertj.core.api.Assertions.assertThat;
++import com.google.zxing.BinaryBitmap;
++import com.google.zxing.MultiFormatReader;
++import com.google.zxing.client.j2se.BufferedImageLuminanceSource;
++import com.google.zxing.common.HybridBinarizer;
++import java.nio.file.Path;
++import javax.imageio.ImageIO;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++
++class ZxingQrCodeGeneratorTest {
++    @TempDir Path dir;
++    @Test void generatedPngDecodesToExactTraceUrl() throws Exception {
++        String target = "http://localhost:8080/trace/12345678-1234-1234-1234-123456789abc";
++        var generator = new ZxingQrCodeGenerator(dir.toString(), "http://localhost:8080");
++        assertThat(generator.generateQrCode(target, "batch")).isEqualTo("http://localhost:8080/uploads/qr/batch.png");
++        var image = ImageIO.read(dir.resolve("qr/batch.png").toFile());
++        var bitmap = new BinaryBitmap(new HybridBinarizer(new BufferedImageLuminanceSource(image)));
++        assertThat(new MultiFormatReader().decode(bitmap).getText()).isEqualTo(target);
++    }
++}
+--- a/src/test/java/com/vcraft/infrastructure/security/JwtTokenProviderTest.java
++++ b/src/test/java/com/vcraft/infrastructure/security/JwtTokenProviderTest.java
+@@ -100,4 +100,16 @@
+ 
+         assertThat(provider.parseClaims(expiredToken)).isEmpty();
+     }
++
++    @org.junit.jupiter.api.Test
++    void missingSecretUsesDistinctRandomKeyPerInstance() {
++        var first = new JwtTokenProvider(new JwtProperties("", 60, 7));
++        var second = new JwtTokenProvider(new JwtProperties("", 60, 7));
++        var user = new com.vcraft.domain.model.User(java.util.UUID.randomUUID(), "test@v.vn", "hash", "Test", null,
++                com.vcraft.domain.model.Role.BUYER, com.vcraft.domain.model.UserStatus.ACTIVE,
++                java.time.Instant.now(), java.time.Instant.now());
++        String token = first.issueAccessToken(user);
++        org.assertj.core.api.Assertions.assertThat(first.parseClaims(token)).isPresent();
++        org.assertj.core.api.Assertions.assertThat(second.parseClaims(token)).isEmpty();
++    }
+ }
+--- a/src/test/java/com/vcraft/infrastructure/storage/LocalImageStorageServiceTest.java
++++ b/src/test/java/com/vcraft/infrastructure/storage/LocalImageStorageServiceTest.java
+@@ -0,0 +1,36 @@
++package com.vcraft.infrastructure.storage;
++
++import static org.assertj.core.api.Assertions.*;
++import com.vcraft.domain.exception.InvalidInputException;
++import java.awt.image.BufferedImage;
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
++import java.nio.file.Path;
++import javax.imageio.ImageIO;
++import org.junit.jupiter.api.Test;
++import org.junit.jupiter.api.io.TempDir;
++
++class LocalImageStorageServiceTest {
++    @TempDir Path dir;
++    @Test void encodesAsJpegRegardlessOfOriginalExtension() throws Exception {
++        var bytes = new ByteArrayOutputStream();
++        ImageIO.write(new BufferedImage(2400, 1400, BufferedImage.TYPE_INT_RGB), "png", bytes);
++        var storage = new LocalImageStorageService(dir.toString(), "http://localhost:8080");
++        String url = storage.storeImage(new ByteArrayInputStream(bytes.toByteArray()), "camera.webp", "products");
++        assertThat(url).endsWith(".jpg");
++        Path saved = dir.resolve(url.split("/uploads/")[1]);
++        var image = ImageIO.read(saved.toFile());
++        assertThat(image.getWidth()).isEqualTo(1200);
++        storage.deleteImage(url);
++        assertThat(saved).doesNotExist();
++    }
++    @Test void rejectsNonImagesAndTraversal() {
++        var storage = new LocalImageStorageService(dir.toString(), "http://localhost:8080");
++        assertThatThrownBy(() -> storage.storeImage(new ByteArrayInputStream("bad".getBytes()), "a.png", "products"))
++                .isInstanceOf(InvalidInputException.class);
++        assertThatThrownBy(() -> storage.storeImage(new ByteArrayInputStream(new byte[0]), "a.png", "../outside"))
++                .isInstanceOf(InvalidInputException.class);
++        assertThatThrownBy(() -> storage.deleteImage("http://localhost:8080/uploads/../../outside"))
++                .isInstanceOf(InvalidInputException.class);
++    }
++}
