@@ -42,8 +42,8 @@ public class ReviewController {
     @Operation(summary = "Lấy danh sách đánh giá của sản phẩm kèm điểm trung bình")
     public ResponseEntity<Map<String, Object>> getProductReviews(
             @PathVariable UUID id,
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int limit
+            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
+            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit
     ) {
         List<Review> data = reviewService.getProductReviews(id, page, limit);
         long total = reviewService.countProductReviews(id);
@@ -90,8 +90,8 @@ public class ReviewController {
     @Operation(summary = "Lấy danh sách đánh giá của xưởng gốm kèm điểm trung bình")
     public ResponseEntity<Map<String, Object>> getArtisanReviews(
             @PathVariable UUID id,
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int limit
+            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
+            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit
     ) {
         List<Review> data = reviewService.getArtisanReviews(id, page, limit);
         long total = reviewService.countArtisanReviews(id);

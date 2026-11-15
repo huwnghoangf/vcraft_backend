@@ -9,6 +9,9 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 public interface OrderJpaRepository extends JpaRepository<OrderEntity, UUID> {
+    @Override
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    java.util.Optional<OrderEntity> findById(UUID id);
     @Query("SELECT o FROM OrderEntity o WHERE o.buyerId = :buyerId AND (:status IS NULL OR o.status = :status)")
     Page<OrderEntity> findByBuyerIdAndStatus(@Param("buyerId") UUID buyerId, @Param("status") String status, Pageable pageable);
 

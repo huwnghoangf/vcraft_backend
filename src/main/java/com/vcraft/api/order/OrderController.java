@@ -49,8 +49,8 @@ public class OrderController {
     @Operation(summary = "Lịch sử đơn hàng của Buyer")
     public ResponseEntity<PageResponse<Order>> getMyOrders(
             Authentication authentication,
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int limit,
+            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
+            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
             @RequestParam(required = false) String status
     ) {
         Caller caller = CallerResolver.resolve(authentication);
@@ -81,8 +81,8 @@ public class OrderController {
     @Operation(summary = "Nghệ nhân xem danh sách đơn hàng mà xưởng nhận được")
     public ResponseEntity<PageResponse<Order>> getArtisanOrders(
             Authentication authentication,
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int limit,
+            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
+            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
             @RequestParam(required = false) String status
     ) {
         Caller caller = CallerResolver.resolve(authentication);

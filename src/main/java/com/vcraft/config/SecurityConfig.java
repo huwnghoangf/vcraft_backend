@@ -28,8 +28,11 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 @Configuration
 @EnableConfigurationProperties(JwtProperties.class)
 public class SecurityConfig {
+    @org.springframework.beans.factory.annotation.Value("${app.cors-allowed-origins:http://localhost:3000,http://localhost:8080}")
+    private List<String> allowedOrigins;
 
     private static final String[] PUBLIC_GET_ENDPOINTS = {
+            "/vcraft.css", "/trace.html", "/trace.js", "/trace/*", "/api/v1/qr/**",
             "/api/v1/health",
             "/api/v1/artisans",
             "/api/v1/artisans/map",
@@ -63,7 +66,7 @@ public class SecurityConfig {
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http,
                                                    JwtTokenProvider tokenProvider,
-                                                   ObjectMapper objectMapper) throws Exception {
+                                                   ObjectMapper objectMapper, com.vcraft.domain.repository.UserRepository users) throws Exception {
         http
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
                 .csrf(AbstractHttpConfigurer::disable)
@@ -72,11 +75,12 @@ public class SecurityConfig {
                         .authenticationEntryPoint(jsonUnauthorizedEntryPoint(objectMapper))
                         .accessDeniedHandler(jsonAccessDeniedHandler(objectMapper)))
                 .authorizeHttpRequests(auth -> auth
+                        .dispatcherTypeMatchers(jakarta.servlet.DispatcherType.FORWARD).permitAll()
                         .requestMatchers(PUBLIC_POST_ENDPOINTS).permitAll()
                         .requestMatchers(HttpMethod.GET, PUBLIC_GET_ENDPOINTS).permitAll()
                         .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
                         .anyRequest().authenticated())
-                .addFilterBefore(new JwtAuthenticationFilter(tokenProvider), UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(new JwtAuthenticationFilter(tokenProvider, users), UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
     }
@@ -84,7 +88,7 @@ public class SecurityConfig {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration config = new CorsConfiguration();
-        config.setAllowedOriginPatterns(List.of("*"));
+        config.setAllowedOrigins(allowedOrigins);
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         config.setAllowedHeaders(List.of("*"));
         config.setAllowCredentials(true);

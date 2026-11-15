@@ -56,6 +56,9 @@ public class AdminService {
                 artisan.familyHistory(), artisan.certificates(), artisan.images(),
                 ArtisanStatus.APPROVED, null, artisan.createdAt(), Instant.now()
         );
+        userRepository.findById(artisan.userId()).ifPresent(u -> userRepository.save(new User(
+                u.id(), u.email(), u.passwordHash(), u.fullName(), u.phone(), u.role(),
+                UserStatus.ACTIVE, u.createdAt(), Instant.now())));
         return artisanRepository.save(approved);
     }
 
@@ -115,6 +118,9 @@ public class AdminService {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new NotFoundException("Không tìm thấy người dùng"));
 
+        if (user.role() == com.vcraft.domain.model.Role.ARTISAN) {
+            artisanRepository.findByUserId(user.id()).ifPresent(a -> blockArtisan(caller, a.id(), reason));
+        }
         User blocked = new User(
                 user.id(), user.email(), user.passwordHash(), user.fullName(), user.phone(),
                 user.role(), UserStatus.BLOCKED, user.createdAt(), Instant.now()
@@ -124,16 +130,20 @@ public class AdminService {
 
     public List<QuoteRequest> getAllQuotes(Caller caller, String status, int page, int limit) {
         caller.requireAdmin();
-        QuoteStatus quoteStatus = status != null && !status.isBlank() ? QuoteStatus.valueOf(status.toUpperCase()) : null;
+        QuoteStatus quoteStatus = status != null && !status.isBlank() ? parseStatus(status) : null;
         return quoteRepository.findAll(quoteStatus, page, limit);
     }
 
     public long countAllQuotes(Caller caller, String status) {
         caller.requireAdmin();
-        QuoteStatus quoteStatus = status != null && !status.isBlank() ? QuoteStatus.valueOf(status.toUpperCase()) : null;
+        QuoteStatus quoteStatus = status != null && !status.isBlank() ? parseStatus(status) : null;
         return quoteRepository.countAll(quoteStatus);
     }
 
+    private QuoteStatus parseStatus(String value) {
+        try { return QuoteStatus.valueOf(value.toUpperCase()); }
+        catch (IllegalArgumentException ex) { throw new com.vcraft.domain.exception.InvalidInputException("Trạng thái báo giá không hợp lệ"); }
+    }
     public Map<String, Object> getDashboardStats(Caller caller) {
         caller.requireAdmin();
         long totalArtisans = artisanRepository.countApproved(null, null);

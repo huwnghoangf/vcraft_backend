@@ -59,12 +59,15 @@ public class GlobalExceptionHandler {
             HttpMediaTypeNotSupportedException.class,
             MissingServletRequestParameterException.class,
             MissingRequestHeaderException.class,
+            org.springframework.web.multipart.support.MissingServletRequestPartException.class,
             NoResourceFoundException.class
     })
     public ResponseEntity<ErrorResponse> handleSpringMvc(Exception ex, HttpServletRequest request) {
         HttpStatus status = HttpStatus.BAD_REQUEST;
         if (ex instanceof NoResourceFoundException) {
             status = HttpStatus.NOT_FOUND;
+        } else if (ex instanceof HttpMediaTypeNotSupportedException) {
+            status = HttpStatus.UNSUPPORTED_MEDIA_TYPE;
         } else if (ex instanceof HttpRequestMethodNotSupportedException) {
             status = HttpStatus.METHOD_NOT_ALLOWED;
         }
@@ -75,6 +78,22 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleDataIntegrity(DataIntegrityViolationException ex, HttpServletRequest request) {
         log.warn("Lỗi ràng buộc dữ liệu tại {}: {}", request.getRequestURI(), ex.getMostSpecificCause().getMessage());
         return build(HttpStatus.CONFLICT, "Dữ liệu bị trùng lặp hoặc vi phạm ràng buộc dữ liệu trong hệ thống", request);
+    }
+
+    @ExceptionHandler(org.springframework.web.multipart.MaxUploadSizeExceededException.class)
+    public ResponseEntity<ErrorResponse> handleUploadSize(Exception ex, HttpServletRequest request) {
+        return build(HttpStatus.PAYLOAD_TOO_LARGE, "Ảnh tối đa 10MB, tổng request tối đa 50MB", request);
+    }
+
+    @ExceptionHandler(org.springframework.dao.ConcurrencyFailureException.class)
+    public ResponseEntity<ErrorResponse> handleConcurrency(Exception ex, HttpServletRequest request) {
+        return build(HttpStatus.CONFLICT, "Dữ liệu vừa được thay đổi, vui lòng tải lại và thử lại", request);
+    }
+
+    @ExceptionHandler({org.springframework.web.method.annotation.HandlerMethodValidationException.class,
+            jakarta.validation.ConstraintViolationException.class})
+    public ResponseEntity<ErrorResponse> handleParameterValidation(Exception ex, HttpServletRequest request) {
+        return build(HttpStatus.BAD_REQUEST, "Tham số không hợp lệ: page >= 1, 1 <= limit <= 100", request);
     }
 
     @ExceptionHandler(Exception.class)

@@ -18,9 +18,15 @@ import org.springframework.web.filter.OncePerRequestFilter;
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     private final JwtTokenProvider tokenProvider;
+    private com.vcraft.domain.repository.UserRepository users;
 
     public JwtAuthenticationFilter(JwtTokenProvider tokenProvider) {
         this.tokenProvider = tokenProvider;
+    }
+
+    public JwtAuthenticationFilter(JwtTokenProvider provider, com.vcraft.domain.repository.UserRepository users) {
+        this(provider);
+        this.users = users;
     }
 
     @Override
@@ -33,6 +39,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             tokenProvider.parseClaims(token).ifPresent(claims -> {
                 try {
                     UUID userId = UUID.fromString(claims.getSubject());
+                    if (users != null && users.findById(userId).filter(com.vcraft.domain.model.User::isActive).isEmpty()) return;
                     String email = claims.get("email", String.class);
                     String roleStr = claims.get("role", String.class);
                     Role role = Role.fromString(roleStr);

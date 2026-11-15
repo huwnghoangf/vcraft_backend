@@ -9,6 +9,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 public interface CartItemJpaRepository extends JpaRepository<CartItemEntity, UUID> {
+    java.util.List<CartItemEntity> findByCartId(UUID cartId);
     Optional<CartItemEntity> findByCartIdAndProductId(UUID cartId, UUID productId);
 
     @Modifying

@@ -107,12 +107,12 @@ public class AuthController {
     @PostMapping("/forgot-password")
     @Operation(summary = "Yêu cầu đặt lại mật khẩu qua email")
     public ResponseEntity<Map<String, String>> forgotPassword(@RequestBody Map<String, String> body) {
-        return ResponseEntity.ok(Map.of("message", "Email hướng dẫn đặt lại mật khẩu đã được gửi"));
+        return ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).body(Map.of("message", "Chưa cấu hình dịch vụ email đặt lại mật khẩu"));
     }
 
     @PostMapping("/reset-password")
     @Operation(summary = "Xác nhận đặt lại mật khẩu mới")
     public ResponseEntity<Map<String, String>> resetPassword(@RequestBody Map<String, String> body) {
-        return ResponseEntity.ok(Map.of("message", "Mật khẩu đã được đặt lại thành công"));
+        return ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).body(Map.of("message", "Chưa triển khai luồng xác thực token đặt lại mật khẩu"));
     }
 }

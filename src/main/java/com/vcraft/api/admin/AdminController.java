@@ -37,8 +37,8 @@ public class AdminController {
     @Operation(summary = "Danh sách nghệ nhân đang chờ duyệt hồ sơ đăng ký vào làng nghề")
     public ResponseEntity<PageResponse<ArtisanProfile>> getPendingArtisans(
             Authentication authentication,
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int limit
+            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
+            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit
     ) {
         Caller caller = CallerResolver.resolve(authentication);
         List<ArtisanProfile> data = adminService.getPendingArtisans(caller, page, limit);
@@ -79,8 +79,8 @@ public class AdminController {
     public ResponseEntity<PageResponse<User>> getUsers(
             Authentication authentication,
             @RequestParam(required = false) String role,
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int limit,
+            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
+            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
             @RequestParam(required = false) String search
     ) {
         Caller caller = CallerResolver.resolve(authentication);
@@ -104,8 +104,8 @@ public class AdminController {
     public ResponseEntity<PageResponse<QuoteRequest>> getAllQuotes(
             Authentication authentication,
             @RequestParam(required = false) String status,
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int limit
+            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
+            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit
     ) {
         Caller caller = CallerResolver.resolve(authentication);
         List<QuoteRequest> data = adminService.getAllQuotes(caller, status, page, limit);

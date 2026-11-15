@@ -10,7 +10,7 @@ public enum NewsType {
         try {
             return NewsType.valueOf(val.toUpperCase());
         } catch (IllegalArgumentException e) {
-            return POLICY;
+            throw new com.vcraft.domain.exception.InvalidInputException("Loại tin không hợp lệ");
         }
     }
 }

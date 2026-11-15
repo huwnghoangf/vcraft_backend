@@ -34,7 +34,10 @@ public class CartService {
         Product product = productRepository.findById(productId)
                 .orElseThrow(() -> new NotFoundException("Sản phẩm không tồn tại"));
 
-        cartRepository.addItem(cart.id(), product.id(), quantity > 0 ? quantity : 1);
+        long current = cart.items().stream().filter(i -> i.productId().equals(productId)).mapToLong(i -> i.quantity()).sum();
+        if (quantity <= 0 || current + quantity > product.stock())
+            throw new com.vcraft.domain.exception.InvalidInputException("Số lượng phải dương và không vượt tồn kho");
+        cartRepository.addItem(cart.id(), product.id(), quantity);
         return getOrCreateCart(caller);
     }
 

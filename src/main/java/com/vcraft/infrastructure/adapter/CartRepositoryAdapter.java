@@ -73,7 +73,7 @@ public class CartRepositoryAdapter implements CartRepository {
     }
 
     private Cart toDomain(CartEntity entity) {
-        List<CartItem> items = entity.getItems().stream()
+        List<CartItem> items = cartItemJpaRepository.findByCartId(entity.getId()).stream()
                 .map(i -> new CartItem(i.getId(), entity.getId(), i.getProductId(), i.getQuantity(), i.getCreatedAt()))
                 .toList();
         return new Cart(entity.getId(), entity.getUserId(), items, entity.getCreatedAt());

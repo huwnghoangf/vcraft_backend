@@ -24,5 +24,7 @@ public record RegisterArtisanRequest(
         Double lng,
         String description,
         List<String> certificates,
+        @NotBlank(message = "Mật khẩu không được để trống")
+        @jakarta.validation.constraints.Size(min = 6, message = "Mật khẩu tối thiểu 6 ký tự")
         String password
 ) {}

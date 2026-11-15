@@ -100,4 +100,16 @@ class JwtTokenProviderTest {
 
         assertThat(provider.parseClaims(expiredToken)).isEmpty();
     }
+
+    @org.junit.jupiter.api.Test
+    void missingSecretUsesDistinctRandomKeyPerInstance() {
+        var first = new JwtTokenProvider(new JwtProperties("", 60, 7));
+        var second = new JwtTokenProvider(new JwtProperties("", 60, 7));
+        var user = new com.vcraft.domain.model.User(java.util.UUID.randomUUID(), "test@v.vn", "hash", "Test", null,
+                com.vcraft.domain.model.Role.BUYER, com.vcraft.domain.model.UserStatus.ACTIVE,
+                java.time.Instant.now(), java.time.Instant.now());
+        String token = first.issueAccessToken(user);
+        org.assertj.core.api.Assertions.assertThat(first.parseClaims(token)).isPresent();
+        org.assertj.core.api.Assertions.assertThat(second.parseClaims(token)).isEmpty();
+    }
 }

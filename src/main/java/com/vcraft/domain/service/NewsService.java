@@ -52,6 +52,8 @@ public class NewsService {
     public News updateNews(Caller caller, UUID id, String title, String content, String type) {
         caller.requireAdmin();
         News current = getNewsDetail(id);
+        if ((title != null && title.isBlank()) || (content != null && content.isBlank()))
+            throw new com.vcraft.domain.exception.InvalidInputException("Tiêu đề và nội dung không được trống");
 
         News updated = new News(
                 current.id(),

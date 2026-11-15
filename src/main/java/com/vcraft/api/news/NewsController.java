@@ -40,8 +40,8 @@ public class NewsController {
     @GetMapping
     @Operation(summary = "Danh sách tin tức và thông báo cộng đồng làng nghề")
     public ResponseEntity<PageResponse<News>> getNewsList(
-            @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "10") int limit,
+            @RequestParam(defaultValue = "1") @jakarta.validation.constraints.Min(1) int page,
+            @RequestParam(defaultValue = "10") @jakarta.validation.constraints.Min(1) @jakarta.validation.constraints.Max(100) int limit,
             @RequestParam(required = false) String type
     ) {
         List<News> data = newsService.getNewsList(type, page, limit);

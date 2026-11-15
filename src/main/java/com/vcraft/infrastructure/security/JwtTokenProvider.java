@@ -24,7 +24,9 @@ public class JwtTokenProvider implements TokenIssuer {
     private final Duration refreshTokenTtl;
 
     public JwtTokenProvider(JwtProperties properties) {
-        this.key = Keys.hmacShaKeyFor(properties.secret().getBytes(StandardCharsets.UTF_8));
+        this.key = properties.secret() == null || properties.secret().isBlank()
+                ? Jwts.SIG.HS256.key().build()
+                : Keys.hmacShaKeyFor(properties.secret().getBytes(StandardCharsets.UTF_8));
         this.accessTokenTtl = Duration.ofMinutes(properties.accessTokenMinutes() > 0 ? properties.accessTokenMinutes() : 60);
         this.refreshTokenTtl = Duration.ofDays(properties.refreshTokenDays() > 0 ? properties.refreshTokenDays() : 7);
     }

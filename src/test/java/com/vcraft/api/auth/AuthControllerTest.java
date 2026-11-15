@@ -59,6 +59,9 @@ class AuthControllerTest {
     private AuthService authService;
 
     @MockitoBean
+    private com.vcraft.domain.repository.UserRepository users;
+
+    @MockitoBean
     private JwtTokenProvider jwtTokenProvider;
 
     // ====== Đăng nhập - Error Tests ======

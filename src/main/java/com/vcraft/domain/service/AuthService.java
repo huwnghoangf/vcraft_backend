@@ -39,6 +39,7 @@ public class AuthService {
     }
 
     public AuthResult registerBuyer(String name, String email, String rawPassword, String phone) {
+        email = email.toLowerCase().trim();
         if (userRepository.existsByEmail(email)) {
             throw new ConflictException("Email đã được đăng ký trong hệ thống");
         }
@@ -65,6 +66,10 @@ public class AuthService {
     public ArtisanProfile registerArtisan(String workshopName, String ownerName, String email,
                                           String phone, String address, Double lat, Double lng,
                                           String description, List<String> certificates, String rawPassword) {
+        if ((lat != null && (!Double.isFinite(lat) || lat < -90 || lat > 90))
+                || (lng != null && (!Double.isFinite(lng) || lng < -180 || lng > 180)))
+            throw new InvalidInputException("Tọa độ xưởng không hợp lệ");
+        email = email.toLowerCase().trim();
         if (userRepository.existsByEmail(email)) {
             throw new ConflictException("Email đã được đăng ký trong hệ thống");
         }
@@ -72,7 +77,7 @@ public class AuthService {
         User user = new User(
                 UUID.randomUUID(),
                 email.toLowerCase().trim(),
-                passwordHasher.hash(rawPassword != null ? rawPassword : "Artisan@" + System.currentTimeMillis()),
+                passwordHasher.hash(rawPassword),
                 ownerName,
                 phone,
                 Role.ARTISAN,
