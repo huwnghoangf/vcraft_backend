@@ -40,6 +40,7 @@ public class QuoteRequestEntity {
     @Column(nullable = false)
     private String status;
 
+    @org.hibernate.annotations.ColumnTransformer(write = "?::jsonb")
     @Column(columnDefinition = "jsonb")
     @Convert(converter = JsonUuidListConverter.class)
     private List<UUID> targetArtisanIds;
@@ -47,6 +48,7 @@ public class QuoteRequestEntity {
     @Column(name = "delivery_note")
     private String deliveryNote;
 
+    @org.hibernate.annotations.ColumnTransformer(write = "?::jsonb")
     @Column(columnDefinition = "jsonb")
     @Convert(converter = JsonListConverter.class)
     private List<String> deliveryImages;

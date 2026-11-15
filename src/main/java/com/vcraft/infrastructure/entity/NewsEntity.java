@@ -28,6 +28,7 @@ public class NewsEntity {
     @Column(nullable = false)
     private String type;
 
+    @org.hibernate.annotations.ColumnTransformer(write = "?::jsonb")
     @Column(columnDefinition = "jsonb")
     @Convert(converter = JsonListConverter.class)
     private List<String> images;

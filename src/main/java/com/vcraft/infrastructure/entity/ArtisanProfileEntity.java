@@ -42,10 +42,12 @@ public class ArtisanProfileEntity {
     @Column(name = "family_history")
     private String familyHistory;
 
+    @org.hibernate.annotations.ColumnTransformer(write = "?::jsonb")
     @Column(columnDefinition = "jsonb")
     @Convert(converter = JsonListConverter.class)
     private List<String> certificates;
 
+    @org.hibernate.annotations.ColumnTransformer(write = "?::jsonb")
     @Column(columnDefinition = "jsonb")
     @Convert(converter = JsonListConverter.class)
     private List<String> images;

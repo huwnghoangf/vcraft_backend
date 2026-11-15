@@ -37,6 +37,7 @@ public class ProductEntity {
     @Column(nullable = false)
     private int stock;
 
+    @org.hibernate.annotations.ColumnTransformer(write = "?::jsonb")
     @Column(columnDefinition = "jsonb")
     @Convert(converter = JsonListConverter.class)
     private List<String> images;

@@ -17,7 +17,7 @@ public class JsonListConverter implements AttributeConverter<List<String>, Strin
         try {
             return MAPPER.writeValueAsString(attribute);
         } catch (Exception e) {
-            return "[]";
+            throw new IllegalArgumentException("Không thể mã hóa danh sách JSON", e);
         }
     }
 
@@ -27,7 +27,7 @@ public class JsonListConverter implements AttributeConverter<List<String>, Strin
         try {
             return MAPPER.readValue(dbData, new TypeReference<List<String>>() {});
         } catch (Exception e) {
-            return List.of();
+            throw new IllegalArgumentException("Danh sách JSON trong dữ liệu không hợp lệ", e);
         }
     }
 }

@@ -18,7 +18,7 @@ public class JsonUuidListConverter implements AttributeConverter<List<UUID>, Str
         try {
             return MAPPER.writeValueAsString(attribute);
         } catch (Exception e) {
-            return "[]";
+            throw new IllegalArgumentException("Không thể mã hóa danh sách JSON", e);
         }
     }
 
@@ -28,7 +28,7 @@ public class JsonUuidListConverter implements AttributeConverter<List<UUID>, Str
         try {
             return MAPPER.readValue(dbData, new TypeReference<List<UUID>>() {});
         } catch (Exception e) {
-            return List.of();
+            throw new IllegalArgumentException("Danh sách JSON trong dữ liệu không hợp lệ", e);
         }
     }
 }
