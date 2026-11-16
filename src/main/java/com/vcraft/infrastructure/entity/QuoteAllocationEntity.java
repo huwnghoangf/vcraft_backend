@@ -13,5 +13,6 @@ public class QuoteAllocationEntity {
     @Column(name = "parent_id", nullable = false) private UUID parentId;
     protected QuoteAllocationEntity() {}
     public QuoteAllocationEntity(UUID parentId, UUID childId) { this.parentId = parentId; this.childId = childId; }
+    public UUID getParentId() { return parentId; }
     public UUID getChildId() { return childId; }
 }

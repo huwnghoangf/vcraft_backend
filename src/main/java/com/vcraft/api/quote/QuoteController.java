@@ -134,7 +134,7 @@ public class QuoteController {
     public ResponseEntity<Bid> updateBid(Authentication authentication,
                                          @PathVariable UUID id,
                                          @PathVariable UUID bidId,
-                                         @RequestBody PlaceBidRequest request) {
+                                         @Valid @RequestBody com.vcraft.api.quote.dto.UpdateBidRequest request) {
         Caller caller = CallerResolver.resolve(authentication);
         Bid updated = quoteService.updateBid(caller, id, bidId, request.pricePerUnit(), request.estimatedDays(), request.note());
         return ResponseEntity.ok(updated);
@@ -165,6 +165,19 @@ public class QuoteController {
     public ResponseEntity<List<QuoteRequest>> allocate(Authentication authentication, @PathVariable UUID id,
                                                        @RequestBody List<QuoteService.Allocation> parts) {
         return ResponseEntity.status(HttpStatus.CREATED).body(quoteService.allocate(CallerResolver.resolve(authentication), id, parts));
+    }
+
+    @PostMapping("/{id}/accept-allocations")
+    @Operation(summary = "Buyer chọn nhiều giá thầu và số lượng cho từng xưởng, sau khi đã nhận chào giá")
+    public ResponseEntity<List<QuoteRequest>> acceptAllocations(Authentication authentication, @PathVariable UUID id,
+            @RequestBody List<QuoteService.BidAllocation> parts) {
+        return ResponseEntity.status(HttpStatus.CREATED).body(quoteService.acceptAllocations(CallerResolver.resolve(authentication), id, parts));
+    }
+
+    @GetMapping("/{id}/allocation-progress")
+    @Operation(summary = "Buyer/BQL xem tổng tiến độ, số lượng đã nhận/sản xuất/giao/xác nhận và giá trị đã chốt")
+    public ResponseEntity<QuoteService.AllocationProgress> allocationProgress(Authentication authentication, @PathVariable UUID id) {
+        return ResponseEntity.ok(quoteService.getAllocationProgress(CallerResolver.resolve(authentication), id));
     }
 
     @GetMapping("/{id}/allocations")

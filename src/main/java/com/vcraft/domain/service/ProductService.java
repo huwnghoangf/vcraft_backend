@@ -113,6 +113,7 @@ public class ProductService {
         checkArtisanOwnership(caller, getProductDetail(productId).artisanId());
     }
     private void validateValues(BigDecimal price, int stock) {
+        com.vcraft.domain.model.Money.positive(price);
         if (price == null || price.signum() <= 0 || stock < 0)
             throw new com.vcraft.domain.exception.InvalidInputException("Giá phải dương, tồn kho không âm");
     }

@@ -18,6 +18,10 @@ import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
 public class QuoteService {
+    public record BidAllocation(UUID bidId, int quantity) {}
+    public record AllocationProgress(UUID parentId, QuoteStatus overallStatus, int totalQuantity,
+            long acceptedQuantity, long deliveredQuantity, long confirmedQuantity,
+            BigDecimal acceptedValue, List<QuoteRequest> parts) {}
     public record Allocation(UUID artisanId, int quantity) {}
     public record QuoteWithBids(QuoteRequest quote, List<Bid> bids) {}
     private final QuoteRepository quoteRepository;
@@ -231,6 +235,7 @@ public class QuoteService {
         if (totalPrice != null && totalPrice.compareTo(pricePerUnit.multiply(BigDecimal.valueOf(quote.quantity()))) != 0) {
             throw new InvalidInputException("Tổng giá phải bằng đơn giá nhân số lượng");
         }
+        com.vcraft.domain.model.Money.positive(pricePerUnit.multiply(BigDecimal.valueOf(quote.quantity())));
         Bid bid = new Bid(
                 UUID.randomUUID(),
                 quoteId,
@@ -258,17 +263,18 @@ public class QuoteService {
     }
     public Bid updateBid(Caller caller, UUID quoteId, UUID bidId, BigDecimal pricePerUnit,
                          Integer estimatedDays, String note) {
+        QuoteRequest quote = getQuote(quoteId);
         Bid current = bidRepository.findById(bidId)
                 .orElseThrow(() -> new NotFoundException("Không tìm thấy giá thầu"));
         checkArtisanOwnership(caller, current.artisanId());
         if (current.status() != BidStatus.PENDING) {
             throw new ConflictException("Không thể sửa giá thầu đã được chấp thuận hoặc từ chối");
         }
-        QuoteRequest quote = getQuote(quoteId);
         requirePendingBid(quote, current);
         validateBid(pricePerUnit != null ? pricePerUnit : current.pricePerUnit(),
                 estimatedDays != null ? estimatedDays : current.estimatedDays());
         BigDecimal newTotal = pricePerUnit != null ? pricePerUnit.multiply(BigDecimal.valueOf(quote.quantity())) : current.totalPrice();
+        com.vcraft.domain.model.Money.positive(newTotal);
         Bid updated = new Bid(
                 current.id(),
                 current.quoteRequestId(),
@@ -305,7 +311,7 @@ public class QuoteService {
         bidRepository.save(accepted);
         // Từ chối tất cả các bid khác
         bidRepository.updateStatusForOtherBids(quoteId, bidId, BidStatus.REJECTED);
-        // Chuyển QuoteRequest sang IN_PRODUCTION
+        // Buyer accepts; workshop must explicitly start production.
         QuoteRequest updatedQuote = new QuoteRequest(
                 quote.id(), quote.buyerId(), quote.categoryId(), quote.title(), quote.description(),
                 quote.quantity(), quote.unit(), quote.deadline(), QuoteStatus.ACCEPTED,
@@ -359,6 +365,7 @@ public class QuoteService {
     public List<QuoteRequest> allocate(Caller caller, UUID quoteId, List<Allocation> parts) {
         caller.requireAdmin();
         QuoteRequest parent = getQuote(quoteId);
+        requireRoot(parent.id());
         if (parent.status() != QuoteStatus.DRAFT && parent.status() != QuoteStatus.SENT)
             throw new ConflictException("Chỉ điều phối yêu cầu chưa có chào giá");
         if (!bidRepository.findByQuoteRequestId(quoteId).isEmpty())
@@ -386,6 +393,88 @@ public class QuoteService {
                 parent.targetArtisanIds(), parent.deliveryNote(), parent.deliveryImages(), null,
                 parent.version() + 1, parent.createdAt(), Instant.now()));
         return children;
+    }
+
+    /** Buyer explicitly accepts quantities at the quoted unit prices; no production is started implicitly. */
+    public List<QuoteRequest> acceptAllocations(Caller caller, UUID quoteId, List<BidAllocation> parts) {
+        QuoteRequest parent = getQuote(quoteId);
+        checkBuyerOwnership(caller, parent.buyerId());
+        requireRoot(parent.id());
+        if (!parent.canReceiveBids()) throw new ConflictException("Yêu cầu không còn nhận chào giá");
+        if (parts == null || parts.size() < 2 || parts.stream().anyMatch(p -> p == null || p.bidId() == null || p.quantity() <= 0)
+                || parts.stream().mapToLong(BidAllocation::quantity).sum() != parent.quantity()
+                || parts.stream().map(BidAllocation::bidId).distinct().count() != parts.size())
+            throw new InvalidInputException("Cần ít nhất hai giá thầu khác nhau; tổng số lượng phải bằng đơn gốc");
+        var selected = new java.util.LinkedHashMap<UUID, Bid>();
+        for (var part : parts) {
+            Bid bid = bidRepository.findById(part.bidId()).orElseThrow(() -> new NotFoundException("Không tìm thấy giá thầu"));
+            requirePendingBid(parent, bid);
+            var artisan = artisanRepository.findById(bid.artisanId()).filter(ArtisanProfile::isApproved)
+                    .orElseThrow(() -> new ConflictException("Xưởng được chọn chưa được duyệt hoặc đã bị khóa"));
+            if (selected.values().stream().anyMatch(b -> b.artisanId().equals(artisan.id())))
+                throw new InvalidInputException("Mỗi xưởng chỉ được phân bổ một phần");
+            selected.put(bid.id(), bid);
+        }
+        var children = new java.util.ArrayList<QuoteRequest>();
+        for (var part : parts) {
+            Bid source = selected.get(part.bidId());
+            UUID childId = UUID.randomUUID(), bidId = UUID.randomUUID();
+            // Insert child first so bid FK is valid, then point it at its accepted bid.
+            var child = quoteRepository.save(new QuoteRequest(childId, parent.buyerId(), parent.categoryId(), parent.title(),
+                    parent.description(), part.quantity(), parent.unit(), parent.deadline(), QuoteStatus.SENT,
+                    List.of(source.artisanId()), null, List.of(), null, 0, Instant.now(), Instant.now()));
+            bidRepository.save(new Bid(bidId, childId, source.artisanId(), source.pricePerUnit(),
+                    source.pricePerUnit().multiply(BigDecimal.valueOf(part.quantity())), source.estimatedDays(),
+                    source.note(), source.deliveryTerms(), BidStatus.ACCEPTED, Instant.now(), Instant.now()));
+            child = quoteRepository.save(new QuoteRequest(child.id(), child.buyerId(), child.categoryId(), child.title(),
+                    child.description(), child.quantity(), child.unit(), child.deadline(), QuoteStatus.ACCEPTED,
+                    child.targetArtisanIds(), null, List.of(), bidId, 1, child.createdAt(), Instant.now()));
+            quoteRepository.linkAllocation(parent.id(), child.id());
+            children.add(child);
+        }
+        for (Bid original : bidRepository.findByQuoteRequestId(quoteId)) {
+            if (original.status() != BidStatus.PENDING) continue;
+            bidRepository.save(new Bid(original.id(), original.quoteRequestId(), original.artisanId(), original.pricePerUnit(),
+                    original.totalPrice(), original.estimatedDays(), original.note(), original.deliveryTerms(),
+                    selected.containsKey(original.id()) ? BidStatus.ACCEPTED : BidStatus.REJECTED, original.createdAt(), Instant.now()));
+        }
+        quoteRepository.save(new QuoteRequest(parent.id(), parent.buyerId(), parent.categoryId(), parent.title(),
+                parent.description(), parent.quantity(), parent.unit(), parent.deadline(), QuoteStatus.ALLOCATED,
+                parent.targetArtisanIds(), parent.deliveryNote(), parent.deliveryImages(), null,
+                parent.version() + 1, parent.createdAt(), Instant.now()));
+        return children;
+    }
+
+    public AllocationProgress getAllocationProgress(Caller caller, UUID id) {
+        var parent = getQuote(id);
+        checkBuyerOwnership(caller, parent.buyerId());
+        var parts = quoteRepository.findAllocations(id);
+        if (parent.status() != QuoteStatus.ALLOCATED || parts.isEmpty()) throw new ConflictException("Yêu cầu chưa được điều phối");
+        if (parts.stream().mapToLong(QuoteRequest::quantity).sum() != parent.quantity())
+            throw new ConflictException("Tổng phân bổ không khớp yêu cầu gốc");
+        long accepted = 0, delivered = 0, confirmed = 0;
+        BigDecimal value = BigDecimal.ZERO;
+        boolean started = false, bidding = false;
+        for (var part : parts) {
+            var status = part.status();
+            if (part.acceptedBidId() != null) {
+                accepted += part.quantity();
+                var bid = bidRepository.findById(part.acceptedBidId()).orElseThrow(() -> new ConflictException("Thiếu bid đã nhận"));
+                value = value.add(bid.totalPrice());
+            }
+            if (status == QuoteStatus.DELIVERED || status == QuoteStatus.CLOSED) delivered += part.quantity();
+            if (status == QuoteStatus.CLOSED) confirmed += part.quantity();
+            started |= status == QuoteStatus.IN_PRODUCTION || status == QuoteStatus.DELIVERED || status == QuoteStatus.CLOSED;
+            bidding |= status == QuoteStatus.BIDDING;
+        }
+        QuoteStatus overall = confirmed == parent.quantity() ? QuoteStatus.CLOSED
+                : delivered == parent.quantity() ? QuoteStatus.DELIVERED : started ? QuoteStatus.IN_PRODUCTION
+                : accepted == parent.quantity() ? QuoteStatus.ACCEPTED : bidding || accepted > 0 ? QuoteStatus.BIDDING : QuoteStatus.SENT;
+        return new AllocationProgress(id, overall, parent.quantity(), accepted, delivered, confirmed, value, parts);
+    }
+
+    private void requireRoot(UUID id) {
+        if (quoteRepository.findParentId(id).isPresent()) throw new ConflictException("Không chia tiếp một phần đã được phân bổ");
     }
 
     public List<QuoteRequest> getAllocations(Caller caller, UUID quoteId) {
@@ -419,11 +508,13 @@ public class QuoteService {
     private void requirePendingBid(QuoteRequest quote, Bid bid) {
         if (!bid.quoteRequestId().equals(quote.id()))
             throw new InvalidInputException("Giá thầu không thuộc yêu cầu này");
+        if (!quote.deadline().isAfter(Instant.now())) throw new ConflictException("Yêu cầu đã quá hạn giao");
         if (!quote.canReceiveBids() || bid.status() != BidStatus.PENDING)
             throw new ConflictException("Yêu cầu đã chốt hoặc giá thầu không còn chờ xử lý");
     }
 
     private void validateBid(BigDecimal price, int days) {
+        com.vcraft.domain.model.Money.positive(price);
         if (price == null || price.signum() <= 0 || days <= 0)
             throw new InvalidInputException("Đơn giá và thời gian hoàn thành phải lớn hơn 0");
     }

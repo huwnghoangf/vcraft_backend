@@ -35,13 +35,16 @@ public class QuoteRepositoryAdapter implements QuoteRepository {
     }
 
     @Override
+    public Optional<UUID> findParentId(UUID childId) { return allocations.findById(childId).map(com.vcraft.infrastructure.entity.QuoteAllocationEntity::getParentId); }
+
+    @Override
     public void linkAllocation(UUID parentId, UUID childId) {
         allocations.save(new com.vcraft.infrastructure.entity.QuoteAllocationEntity(parentId, childId));
     }
 
     @Override
     public List<QuoteRequest> findAllocations(UUID parentId) {
-        return allocations.findByParentId(parentId).stream()
+        return allocations.findByParentId(parentId).stream().sorted(java.util.Comparator.comparing(a -> a.getChildId().toString()))
                 .map(link -> jpaRepository.findById(link.getChildId()).orElseThrow())
                 .map(this::toDomain).toList();
     }

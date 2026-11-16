@@ -9,6 +9,7 @@ import java.util.UUID;
 public interface QuoteRepository {
     Optional<QuoteRequest> findById(UUID id);
     QuoteRequest save(QuoteRequest quote);
+    Optional<UUID> findParentId(UUID childId);
     void linkAllocation(UUID parentId, UUID childId);
     List<QuoteRequest> findAllocations(UUID parentId);
     void deleteById(UUID id);

@@ -61,6 +61,7 @@ public class OrderService {
                     item.quantity()
             ));
         }
+        com.vcraft.domain.model.Money.positive(totalAmount);
         Order order = new Order(
                 orderId,
                 buyerId,
