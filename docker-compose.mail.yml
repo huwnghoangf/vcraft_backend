@@ -1,0 +1,16 @@
+# Optional local inbox. Messages stay in Mailpit; no external SMTP delivery.
+services:
+  backend:
+    environment:
+      MAIL_ENABLED: 'true'
+      SMTP_HOST: mailpit
+      SMTP_PORT: '1025'
+      SMTP_STARTTLS: 'false'
+      SMTP_USERNAME: ''
+      SMTP_PASSWORD: ''
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports:
+      - '127.0.0.1:8025:8025'
+    networks:
+      - vcraft_net

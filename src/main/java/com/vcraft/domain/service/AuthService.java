@@ -43,6 +43,7 @@ public class AuthService {
         if (userRepository.existsByEmail(email)) {
             throw new ConflictException("Email đã được đăng ký trong hệ thống");
         }
+        validatePassword(rawPassword);
         User user = new User(
                 UUID.randomUUID(),
                 email.toLowerCase().trim(),
@@ -74,6 +75,7 @@ public class AuthService {
             throw new ConflictException("Email đã được đăng ký trong hệ thống");
         }
 
+        validatePassword(rawPassword);
         User user = new User(
                 UUID.randomUUID(),
                 email.toLowerCase().trim(),
@@ -159,8 +161,14 @@ public class AuthService {
                 .orElseThrow(() -> new NotFoundException("Không tìm thấy thông tin tài khoản"));
     }
 
+    private void validatePassword(String password) {
+        if (password == null || password.isBlank() || password.length() < 6
+                || password.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 72)
+            throw new InvalidInputException("Mật khẩu cần ít nhất 6 ký tự, tối đa 72 byte UTF-8");
+    }
     public void changePassword(UUID userId, String oldPassword, String newPassword) {
-        User user = getMe(userId);
+        validatePassword(newPassword);
+        User user = userRepository.findByIdForUpdate(userId).orElseThrow(() -> new NotFoundException("Không tìm thấy tài khoản"));
         if (!passwordHasher.matches(oldPassword, user.passwordHash())) {
             throw new InvalidInputException("Mật khẩu hiện tại không chính xác");
         }
@@ -174,7 +182,8 @@ public class AuthService {
                 user.role(),
                 user.status(),
                 user.createdAt(),
-                Instant.now()
+                Instant.now(),
+                user.securityVersion() + 1
         );
         userRepository.save(updated);
         refreshTokenRepository.deleteByUserId(userId);

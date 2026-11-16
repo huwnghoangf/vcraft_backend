@@ -59,6 +59,9 @@ class AuthControllerTest {
     private AuthService authService;
 
     @MockitoBean
+    private com.vcraft.domain.service.PasswordResetService passwordResetService;
+
+    @MockitoBean
     private com.vcraft.domain.repository.UserRepository users;
 
     @MockitoBean

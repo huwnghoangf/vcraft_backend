@@ -21,7 +21,7 @@ public class TransactionConfig {
     @Bean
     public static BeanNameAutoProxyCreator domainTransactions() {
         var proxy = new BeanNameAutoProxyCreator();
-        proxy.setBeanNames("authService", "artisanService", "productService", "categoryService",
+        proxy.setBeanNames("passwordResetService", "authService", "artisanService", "productService", "categoryService",
                 "batchService", "traceService", "quoteService", "cartService", "orderService",
                 "reviewService", "newsService", "adminService");
         proxy.setInterceptorNames("domainTransactionInterceptor");

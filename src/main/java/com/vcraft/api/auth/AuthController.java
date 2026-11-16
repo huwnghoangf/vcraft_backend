@@ -31,9 +31,11 @@ import org.springframework.web.bind.annotation.RestController;
 public class AuthController {
 
     private final AuthService authService;
+    private final com.vcraft.domain.service.PasswordResetService passwordResetService;
 
-    public AuthController(AuthService authService) {
+    public AuthController(AuthService authService, com.vcraft.domain.service.PasswordResetService passwordResetService) {
         this.authService = authService;
+        this.passwordResetService = passwordResetService;
     }
 
     @PostMapping("/register/buyer")
@@ -106,13 +108,15 @@ public class AuthController {
 
     @PostMapping("/forgot-password")
     @Operation(summary = "Yêu cầu đặt lại mật khẩu qua email")
-    public ResponseEntity<Map<String, String>> forgotPassword(@RequestBody Map<String, String> body) {
-        return ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).body(Map.of("message", "Chưa cấu hình dịch vụ email đặt lại mật khẩu"));
+    public ResponseEntity<Map<String, String>> forgotPassword(@Valid @RequestBody com.vcraft.api.auth.dto.ForgotPasswordRequest request) {
+        passwordResetService.request(request.email());
+        return ResponseEntity.accepted().body(Map.of("message", "Nếu tài khoản hợp lệ, hướng dẫn sẽ được gửi qua email"));
     }
 
     @PostMapping("/reset-password")
-    @Operation(summary = "Xác nhận đặt lại mật khẩu mới")
-    public ResponseEntity<Map<String, String>> resetPassword(@RequestBody Map<String, String> body) {
-        return ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).body(Map.of("message", "Chưa triển khai luồng xác thực token đặt lại mật khẩu"));
+    @Operation(summary = "Đặt lại mật khẩu bằng token một lần, hết hạn sau 15 phút")
+    public ResponseEntity<Map<String, String>> resetPassword(@Valid @RequestBody com.vcraft.api.auth.dto.ResetPasswordRequest request) {
+        passwordResetService.reset(request.token(), request.newPassword());
+        return ResponseEntity.ok(Map.of("message", "Đã đặt lại mật khẩu; vui lòng đăng nhập lại"));
     }
 }

@@ -33,6 +33,9 @@ public class UserRepositoryAdapter implements UserRepository {
     }
 
     @Override
+    public Optional<User> findByIdForUpdate(UUID id) { return jpaRepository.findLocked(id).map(this::toDomain); }
+
+    @Override
     public boolean existsByEmail(String email) {
         return jpaRepository.existsByEmail(email);
     }
@@ -66,12 +69,13 @@ public class UserRepositoryAdapter implements UserRepository {
                 Role.valueOf(entity.getRole()),
                 UserStatus.valueOf(entity.getStatus()),
                 entity.getCreatedAt(),
-                entity.getUpdatedAt()
+                entity.getUpdatedAt(),
+                entity.getSecurityVersion()
         );
     }
 
     private UserEntity toEntity(User domain) {
-        return new UserEntity(
+        UserEntity entity = new UserEntity(
                 domain.id(),
                 domain.email(),
                 domain.passwordHash(),
@@ -82,5 +86,7 @@ public class UserRepositoryAdapter implements UserRepository {
                 domain.createdAt(),
                 domain.updatedAt()
         );
+        entity.setSecurityVersion(domain.securityVersion());
+        return entity;
     }
 }

@@ -56,9 +56,9 @@ public class AdminService {
                 artisan.familyHistory(), artisan.certificates(), artisan.images(),
                 ArtisanStatus.APPROVED, null, artisan.createdAt(), Instant.now()
         );
-        userRepository.findById(artisan.userId()).ifPresent(u -> userRepository.save(new User(
+        userRepository.findByIdForUpdate(artisan.userId()).ifPresent(u -> userRepository.save(new User(
                 u.id(), u.email(), u.passwordHash(), u.fullName(), u.phone(), u.role(),
-                UserStatus.ACTIVE, u.createdAt(), Instant.now())));
+                UserStatus.ACTIVE, u.createdAt(), Instant.now(), u.securityVersion())));
         return artisanRepository.save(approved);
     }
 
@@ -92,10 +92,10 @@ public class AdminService {
         ArtisanProfile saved = artisanRepository.save(blocked);
 
         // Khóa luôn tài khoản user tương ứng
-        userRepository.findById(artisan.userId()).ifPresent(u -> {
+        userRepository.findByIdForUpdate(artisan.userId()).ifPresent(u -> {
             User blockedUser = new User(
                     u.id(), u.email(), u.passwordHash(), u.fullName(), u.phone(),
-                    u.role(), UserStatus.BLOCKED, u.createdAt(), Instant.now()
+                    u.role(), UserStatus.BLOCKED, u.createdAt(), Instant.now(), u.securityVersion() + 1
             );
             userRepository.save(blockedUser);
         });
@@ -115,7 +115,7 @@ public class AdminService {
 
     public User blockUser(Caller caller, UUID userId, String reason) {
         caller.requireAdmin();
-        User user = userRepository.findById(userId)
+        User user = userRepository.findByIdForUpdate(userId)
                 .orElseThrow(() -> new NotFoundException("Không tìm thấy người dùng"));
 
         if (user.role() == com.vcraft.domain.model.Role.ARTISAN) {
@@ -123,7 +123,7 @@ public class AdminService {
         }
         User blocked = new User(
                 user.id(), user.email(), user.passwordHash(), user.fullName(), user.phone(),
-                user.role(), UserStatus.BLOCKED, user.createdAt(), Instant.now()
+                user.role(), UserStatus.BLOCKED, user.createdAt(), Instant.now(), user.securityVersion() + 1
         );
         return userRepository.save(blocked);
     }

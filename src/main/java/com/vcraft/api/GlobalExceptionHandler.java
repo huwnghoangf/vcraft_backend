@@ -103,6 +103,7 @@ public class GlobalExceptionHandler {
     }
 
     private HttpStatus statusOf(DomainException ex) {
+        if (ex instanceof com.vcraft.domain.exception.ServiceUnavailableException) return HttpStatus.SERVICE_UNAVAILABLE;
         if (ex instanceof NotFoundException) return HttpStatus.NOT_FOUND;
         if (ex instanceof ForbiddenException) return HttpStatus.FORBIDDEN;
         if (ex instanceof UnauthorizedException) return HttpStatus.UNAUTHORIZED;

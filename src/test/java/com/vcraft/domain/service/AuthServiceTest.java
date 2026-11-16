@@ -204,7 +204,7 @@ class AuthServiceTest {
     @Test
     @DisplayName("Đổi mật khẩu với mật khẩu cũ sai phải ném InvalidInputException")
     void changePasswordWithWrongOldPasswordThrowsInvalidInput() {
-        when(userRepository.findById(USER_ID)).thenReturn(Optional.of(ACTIVE_USER));
+        when(userRepository.findByIdForUpdate(USER_ID)).thenReturn(Optional.of(ACTIVE_USER));
         when(passwordHasher.matches("wrong-old", ACTIVE_USER.passwordHash())).thenReturn(false);
 
         assertThatThrownBy(() -> authService.changePassword(USER_ID, "wrong-old", "new-secret"))

@@ -39,7 +39,11 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             tokenProvider.parseClaims(token).ifPresent(claims -> {
                 try {
                     UUID userId = UUID.fromString(claims.getSubject());
-                    if (users != null && users.findById(userId).filter(com.vcraft.domain.model.User::isActive).isEmpty()) return;
+                    if (users != null) {
+                        var user = users.findById(userId).filter(com.vcraft.domain.model.User::isActive);
+                        Number version = claims.get("ver", Number.class);
+                        if (user.isEmpty() || user.get().securityVersion() != (version == null ? 0 : version.intValue())) return;
+                    }
                     String email = claims.get("email", String.class);
                     String roleStr = claims.get("role", String.class);
                     Role role = Role.fromString(roleStr);

@@ -9,6 +9,7 @@ public interface UserRepository {
     Optional<User> findById(UUID id);
     Optional<User> findByEmail(String email);
     boolean existsByEmail(String email);
+    Optional<User> findByIdForUpdate(UUID id);
     User save(User user);
     List<User> findAll(String role, int page, int limit, String search);
     long count(String role, String search);

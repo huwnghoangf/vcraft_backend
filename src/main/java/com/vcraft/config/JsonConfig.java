@@ -10,6 +10,7 @@ import org.springframework.context.annotation.Configuration;
 public class JsonConfig {
     abstract static class SafeUser {
         @JsonIgnore abstract String passwordHash();
+        @JsonIgnore abstract int securityVersion();
     }
     @Bean
     public Jackson2ObjectMapperBuilderCustomizer safeUsers() {

@@ -39,6 +39,7 @@ public class JwtTokenProvider implements TokenIssuer {
                 .claim("email", user.email())
                 .claim("name", user.fullName())
                 .claim("role", user.role().name())
+                .claim("ver", user.securityVersion())
                 .issuedAt(Date.from(now))
                 .expiration(Date.from(now.plus(accessTokenTtl)))
                 .signWith(key)

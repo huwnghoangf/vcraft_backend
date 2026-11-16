@@ -40,6 +40,12 @@ import org.springframework.context.annotation.Configuration;
 public class DomainBeansConfig {
 
     @Bean
+    public com.vcraft.domain.service.PasswordResetService passwordResetService(UserRepository users,
+            com.vcraft.domain.repository.PasswordResetRepository tokens, RefreshTokenRepository refresh,
+            PasswordHasher hasher, com.vcraft.domain.service.PasswordResetDelivery delivery) {
+        return new com.vcraft.domain.service.PasswordResetService(users, tokens, refresh, hasher, delivery, java.time.Clock.systemUTC());
+    }
+    @Bean
     public AuthService authService(UserRepository userRepository,
                                   ArtisanRepository artisanRepository,
                                   RefreshTokenRepository refreshTokenRepository,

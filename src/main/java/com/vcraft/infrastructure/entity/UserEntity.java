@@ -37,6 +37,10 @@ public class UserEntity {
     @Column(name = "updated_at", nullable = false)
     private Instant updatedAt;
 
+    @Column(name = "security_version", nullable = false)
+    private int securityVersion;
+    public int getSecurityVersion() { return securityVersion; }
+    public void setSecurityVersion(int value) { securityVersion = value; }
     public UserEntity() {}
 
     public UserEntity(UUID id, String email, String passwordHash, String fullName,

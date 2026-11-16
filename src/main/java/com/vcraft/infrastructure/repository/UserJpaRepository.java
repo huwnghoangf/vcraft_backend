@@ -10,6 +10,9 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 public interface UserJpaRepository extends JpaRepository<UserEntity, UUID> {
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT u FROM UserEntity u WHERE u.id = :id")
+    Optional<UserEntity> findLocked(@Param("id") UUID id);
     Optional<UserEntity> findByEmail(String email);
     boolean existsByEmail(String email);
 
