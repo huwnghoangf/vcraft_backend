@@ -1,5 +1,7 @@
 # Báo cáo rà soát vCraft — 15/11/2026
 
+> Đây là báo cáo lịch sử của bản 15/11. Những giới hạn về reset mật khẩu, điều phối sau chào giá và tổng tiến độ đã được xử lý trong bản 16/11; xem [BACKEND_COMPLETION.md](BACKEND_COMPLETION.md).
+
 ## Kết luận và phạm vi
 
 Bản gốc **có lỗi backend cần sửa**, dù 72 unit/API-slice test cũ đều đạt. Theo xác nhận của người dùng, phạm vi công việc là **chỉ backend**, không xây hoặc đánh giá frontend.

@@ -1,0 +1,22 @@
+{
+  "date": "2026-11-16",
+  "base_commit": "87b21d4b9c012c2443679513b37aecc6213280c9",
+  "command": "./mvnw -Pintegration clean verify",
+  "results": {
+    "surefire-reports": {
+      "tests": 89,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    },
+    "failsafe-reports": {
+      "tests": 11,
+      "failures": 0,
+      "errors": 0,
+      "skipped": 0
+    }
+  },
+  "smtp_test": "Mailpit container: SMTP link delivery and TLS-required rejection passed; API reset tests mock delivery; no external mail",
+  "compose_config": "base + Mailpit overlay passed",
+  "github_ci": "Workflow supplied; remote execution unverified: GitHub integration denied tree write with HTTP 403"
+}
