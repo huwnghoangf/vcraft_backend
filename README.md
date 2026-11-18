@@ -44,8 +44,6 @@ Xem chi tiết và test tương tác trực tiếp tại: `http://localhost:8080
 
 ## Bản rà soát và sửa lỗi 15/11/2026
 
-Đọc `AUDIT_VI.md` để xem đối chiếu đề bài, danh sách lỗi và giới hạn kiểm chứng.
-
 - Trang truy xuất QR: `http://localhost:8080/trace/{batchId}`
 - Mặc định `FRONTEND_URL=http://localhost:8080` để QR trỏ tới trang tích hợp. Nếu dùng frontend riêng, đặt lại biến này.
 - Phạm vi bàn giao là backend theo yêu cầu đã làm rõ. API bản đồ trả ghim/popup và trạng thái mở cửa; không xây frontend. Trang trace chỉ là landing page tối thiểu phục vụ QR.
